@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_integration:
+        description: 'Also run integration tests against the nano_test dataset'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  lint-and-test:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv venv --python 3.12 .venv
+
+      - name: Install dependencies
+        run: uv pip install --python .venv/bin/python -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+
+      - name: Unit tests
+        # Unit tests are hermetic: conftest blocks real HTTP and forces test-only
+        # resource names, so this needs no credentials.
+        run: .venv/bin/python -m pytest tests/unit -q
+
+  integration:
+    name: Integration tests (nano_test)
+    runs-on: ubuntu-latest
+    # Opt-in only: these hit real BigQuery, Firestore and Vertex AI, which costs
+    # money and is rate-limited. Never runs automatically on a PR.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_integration
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - name: Set up Python
+        run: uv venv --python 3.12 .venv
+
+      - name: Install dependencies
+        run: uv pip install --python .venv/bin/python -r requirements-dev.txt
+
+      - name: Integration tests
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          BQ_DATASET: nano_test
+          FIRESTORE_PREFIX: nano_test_
+        run: .venv/bin/python -m pytest tests/integration -m integration -q

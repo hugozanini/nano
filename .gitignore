@@ -1,6 +1,17 @@
+# Python
 __pycache__/
 *.pyc
-.env
 .venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets / local config
+.env
+.claude/settings.local.json
+
+# Local-only docs: contain project IDs, phone numbers, verify token
 context.md
 project-log.md
+CLAUDE.local.md

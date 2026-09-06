@@ -1,19 +1,22 @@
-import os
-import json
 import datetime
+import json
+import os
 import uuid
+
 import requests
-from fastapi import FastAPI, Request
-from google.cloud import firestore, bigquery
 import vertexai
-from vertexai.generative_models import GenerativeModel, FunctionDeclaration, Tool, Part
+from fastapi import FastAPI, Request
+from google.cloud import bigquery, firestore
+from vertexai.generative_models import FunctionDeclaration, GenerativeModel, Part, Tool
 
 app = FastAPI()
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "changeme")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
-HOUSEHOLD_NUMBERS = [n.strip() for n in os.environ.get("HOUSEHOLD_NUMBERS", "").split(",") if n.strip()]
+HOUSEHOLD_NUMBERS = [
+    n.strip() for n in os.environ.get("HOUSEHOLD_NUMBERS", "").split(",") if n.strip()
+]
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
 LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
 
@@ -138,6 +141,7 @@ def classify_message(text: str):
 
 # --- Firestore helpers ---
 
+
 def get_current_items():
     doc = LIST_DOC.get()
     return doc.to_dict().get("items", []) if doc.exists else []
@@ -167,8 +171,7 @@ def clear_matched_items(purchased_item_names):
     current = get_current_items()
     purchased_lower = [n.lower() for n in purchased_item_names]
     remaining = [
-        c for c in current
-        if not any(p in c.lower() or c.lower() in p for p in purchased_lower)
+        c for c in current if not any(p in c.lower() or c.lower() in p for p in purchased_lower)
     ]
     LIST_DOC.set({"items": remaining, "updated_at": firestore.SERVER_TIMESTAMP})
     return remaining
@@ -176,12 +179,13 @@ def clear_matched_items(purchased_item_names):
 
 def format_list(items):
     if not items:
-        return "The list is empty right now \U0001F389"
+        return "The list is empty right now \U0001f389"
     bullets = "\n".join(f"- {i}" for i in items)
     return f"Here's the current list ({len(items)} items):\n{bullets}"
 
 
 # --- WhatsApp send + media download ---
+
 
 def send_whatsapp_message(to_number: str, text: str):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
@@ -203,7 +207,9 @@ def notify_household(text: str):
 
 def download_whatsapp_media(media_id: str):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    meta_resp = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers=headers, timeout=10)
+    meta_resp = requests.get(
+        f"https://graph.facebook.com/v20.0/{media_id}", headers=headers, timeout=10
+    )
     meta_resp.raise_for_status()
     meta = meta_resp.json()
     media_resp = requests.get(meta["url"], headers=headers, timeout=20)
@@ -212,6 +218,7 @@ def download_whatsapp_media(media_id: str):
 
 
 # --- Phase 2: receipt extraction + Iceberg writes ---
+
 
 def extract_receipt(image_bytes: bytes, mime_type: str):
     part = Part.from_data(data=image_bytes, mime_type=mime_type)
@@ -259,10 +266,16 @@ def log_purchase(store_name, purchase_date, currency, total_amount, items):
                 query_parameters=[
                     bigquery.ScalarQueryParameter("purchase_id", "STRING", purchase_id),
                     bigquery.ScalarQueryParameter("item_name", "STRING", item["item_name"]),
-                    bigquery.ScalarQueryParameter("normalized_name", "STRING", item["item_name"].lower().strip()),
+                    bigquery.ScalarQueryParameter(
+                        "normalized_name", "STRING", item["item_name"].lower().strip()
+                    ),
                     bigquery.ScalarQueryParameter("quantity", "NUMERIC", item.get("quantity", 1)),
-                    bigquery.ScalarQueryParameter("unit_price", "NUMERIC", item.get("unit_price", 0)),
-                    bigquery.ScalarQueryParameter("line_total", "NUMERIC", item.get("line_total", 0)),
+                    bigquery.ScalarQueryParameter(
+                        "unit_price", "NUMERIC", item.get("unit_price", 0)
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "line_total", "NUMERIC", item.get("line_total", 0)
+                    ),
                 ]
             ),
         ).result()
@@ -271,6 +284,7 @@ def log_purchase(store_name, purchase_date, currency, total_amount, items):
 
 
 # --- Phase 3: history queries ---
+
 
 def period_to_date_range(period: str):
     today = datetime.date.today()
@@ -322,7 +336,9 @@ def answer_history_query(query_type, period="this_month", item_name=None):
                 """,
                 job_config=bigquery.QueryJobConfig(
                     query_parameters=[
-                        bigquery.ScalarQueryParameter("pattern", "STRING", f"%{item_name.lower()}%"),
+                        bigquery.ScalarQueryParameter(
+                            "pattern", "STRING", f"%{item_name.lower()}%"
+                        ),
                     ]
                 ),
             ).result()
@@ -342,7 +358,9 @@ def answer_history_query(query_type, period="this_month", item_name=None):
                 """,
                 job_config=bigquery.QueryJobConfig(
                     query_parameters=[
-                        bigquery.ScalarQueryParameter("pattern", "STRING", f"%{item_name.lower()}%"),
+                        bigquery.ScalarQueryParameter(
+                            "pattern", "STRING", f"%{item_name.lower()}%"
+                        ),
                     ]
                 ),
             ).result()
@@ -355,6 +373,7 @@ def answer_history_query(query_type, period="this_month", item_name=None):
 
 
 # --- Webhook endpoints ---
+
 
 @app.get("/webhook")
 def verify(request: Request):
