@@ -2,4 +2,5 @@ fastapi
 uvicorn
 requests
 google-cloud-firestore
+google-cloud-bigquery
 google-cloud-aiplatform
