@@ -72,6 +72,7 @@ class FakeGeminiModel:
         self.model_name = model_name
         self.calls: list[RecordedCall] = []
         self._queue: list[Any] = []
+        self._default: Any = None
         self._error: Exception | None = None
 
     # --- scripting ----------------------------------------------------------
@@ -97,6 +98,11 @@ class FakeGeminiModel:
         self._error = error
         return self
 
+    def set_default_function_call(self, name: str, **args: Any) -> FakeGeminiModel:
+        """Used only when the queue is empty, so a test's own script wins."""
+        self._default = FakeResponse([FakePart(function_call=FakeFunctionCall(name, args))])
+        return self
+
     # --- client surface -----------------------------------------------------
 
     def generate_content(self, contents: Any, **kwargs: Any) -> Any:
@@ -113,6 +119,8 @@ class FakeGeminiModel:
         if self._error is not None:
             raise self._error
         if not self._queue:
+            if self._default is not None:
+                return self._default
             raise AssertionError(
                 f"FakeGeminiModel got an unscripted call ({len(self.calls)} so far). "
                 "Queue a response with queue_function_call/queue_json/queue_text."
