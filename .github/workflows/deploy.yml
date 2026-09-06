@@ -1,0 +1,38 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/deploy.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: nano-webhook
+          region: us-central1
+          source: ./app
+          env_vars: |
+            VERIFY_TOKEN=${{ secrets.VERIFY_TOKEN }}
+            PHONE_NUMBER_ID=${{ secrets.PHONE_NUMBER_ID }}
+            HOUSEHOLD_NUMBERS="${{ secrets.HOUSEHOLD_NUMBERS }}"
+          secrets: |
+            WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest
+          flags: --service-account=${{ secrets.GCP_RUNTIME_SA }} --allow-unauthenticated
