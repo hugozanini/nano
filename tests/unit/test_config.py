@@ -23,9 +23,17 @@ from tests.fakes.whatsapp import MEMBER_PRIMARY, MEMBER_SECONDARY
 
 
 class TestParseHousehold:
-    def test_members_form_with_names(self):
-        result = parse_household(f"{MEMBER_PRIMARY}:alex,{MEMBER_SECONDARY}:sam", "")
+    @pytest.mark.parametrize("sep", [";", ",", "|"])
+    def test_members_form_with_names(self, sep: str):
+        """Semicolon is what the deploy pipeline uses, because a comma is the
+        one character the CI action splits values on. All three must parse."""
+        result = parse_household(f"{MEMBER_PRIMARY}:alex{sep}{MEMBER_SECONDARY}:sam", "")
         assert result == {MEMBER_PRIMARY: "alex", MEMBER_SECONDARY: "sam"}
+
+    @pytest.mark.parametrize("sep", [";", ",", "|"])
+    def test_legacy_numbers_form_accepts_any_separator(self, sep: str):
+        result = parse_household("", f"{MEMBER_PRIMARY}{sep}{MEMBER_SECONDARY}")
+        assert set(result) == {MEMBER_PRIMARY, MEMBER_SECONDARY}
 
     def test_legacy_numbers_form_gets_generated_names(self):
         result = parse_household("", f"{MEMBER_PRIMARY},{MEMBER_SECONDARY}")

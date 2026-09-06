@@ -55,61 +55,49 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
 
-      # The `env_vars` input is comma-or-newline delimited and requires escaping
-      # for values containing a separator. A comma-separated HOUSEHOLD_NUMBERS
-      # was therefore silently shredded in production into one truncated
-      # variable plus two bogus ones named after the remaining phone numbers,
-      # so Nano only ever messaged one person. `env_vars_file` in JSON needs no
-      # escaping at all, and secrets reach this step through `env:` rather than
-      # shell interpolation so nothing has to be quoted correctly by hand.
-      - name: Compose environment file
+      # `env_vars` below is comma-or-newline delimited, and a value containing a
+      # comma is split at parse time rather than escaped. That is what shredded
+      # HOUSEHOLD_NUMBERS in production into one truncated variable plus two
+      # bogus ones named after the remaining phone numbers, so Nano only ever
+      # messaged one person. The fix is to keep commas out of values entirely:
+      # household entries are semicolon-separated, and the app parses ";", "|"
+      # or ",". This step fails the deploy rather than ship a mangled list.
+      #
+      # (`env_vars_file` would also work and needs no escaping, but the action
+      # has deprecated it for removal in a future major version.)
+      - name: Validate environment secrets
         env:
+          HOUSEHOLD_MEMBERS: ${{ secrets.HOUSEHOLD_MEMBERS }}
           VERIFY_TOKEN: ${{ secrets.VERIFY_TOKEN }}
           PHONE_NUMBER_ID: ${{ secrets.PHONE_NUMBER_ID }}
-          HOUSEHOLD_MEMBERS: ${{ secrets.HOUSEHOLD_MEMBERS }}
-          HOUSEHOLD_TIMEZONE: ${{ secrets.HOUSEHOLD_TIMEZONE }}
-          RECEIPTS_BUCKET: ${{ secrets.RECEIPTS_BUCKET }}
-          TASKS_TARGET_URL: ${{ secrets.TASKS_TARGET_URL }}
-          TASKS_INVOKER_SA: ${{ secrets.TASKS_INVOKER_SA }}
-          # Enforcement stays OFF until the real Meta App Secret is in Secret
-          # Manager. Turning it on with a placeholder would 403 every genuine
-          # webhook and make Meta redeliver everything. Flip the repository
-          # variable to 'true' once the secret holds the real value.
-          REQUIRE_SIGNATURE: ${{ vars.REQUIRE_SIGNATURE || 'false' }}
-          BQ_DATASET: nano
-          TASK_BACKEND: cloud_tasks
-          TASKS_QUEUE: nano-webhook-work
-          TASKS_LOCATION: us-central1
-          VERTEX_LOCATION: us-central1
-          DEFAULT_CURRENCY: EUR
-          LOG_LEVEL: INFO
         run: |
           python3 - <<'PY'
-          import json, os
+          import os, sys
 
-          keys = [
-              "VERIFY_TOKEN", "PHONE_NUMBER_ID", "HOUSEHOLD_MEMBERS",
-              "HOUSEHOLD_TIMEZONE", "RECEIPTS_BUCKET", "TASKS_TARGET_URL",
-              "TASKS_INVOKER_SA", "BQ_DATASET", "TASK_BACKEND", "TASKS_QUEUE",
-              "REQUIRE_SIGNATURE",
-              "TASKS_LOCATION", "VERTEX_LOCATION", "DEFAULT_CURRENCY", "LOG_LEVEL",
-          ]
-          env = {k: os.environ[k] for k in keys if os.environ.get(k)}
+          problems = []
+          for key in ("VERIFY_TOKEN", "PHONE_NUMBER_ID", "HOUSEHOLD_MEMBERS"):
+              if not os.environ.get(key):
+                  problems.append(f"{key} is empty or unset")
 
-          missing = [k for k in ("VERIFY_TOKEN", "PHONE_NUMBER_ID", "HOUSEHOLD_MEMBERS") if k not in env]
-          if missing:
-              raise SystemExit(f"missing required secrets: {', '.join(missing)}")
-
-          # Fail the deploy rather than ship a mangled household list.
-          members = env["HOUSEHOLD_MEMBERS"]
+          members = os.environ.get("HOUSEHOLD_MEMBERS", "")
+          if "," in members:
+              problems.append(
+                  "HOUSEHOLD_MEMBERS contains a comma, which the deploy action "
+                  "splits on. Use ';' between entries: '<number>:name;<number>:name'"
+              )
           if members != members.strip().strip('"\''):
-              raise SystemExit("HOUSEHOLD_MEMBERS has stray quotes; check the secret's value")
+              problems.append("HOUSEHOLD_MEMBERS has stray surrounding quotes")
+          if members and not any(c.isdigit() for c in members):
+              problems.append("HOUSEHOLD_MEMBERS contains no digits")
 
-          with open("cloudrun-env.json", "w") as fh:
-              json.dump(env, fh, indent=2)
+          if problems:
+              print("Environment validation failed:")
+              for p in problems:
+                  print(f"  - {p}")
+              sys.exit(1)
 
-          print(f"composed {len(env)} environment variables")
-          print("keys:", ", ".join(sorted(env)))
+          entries = [e for e in members.split(";") if e.strip()]
+          print(f"validated {len(entries)} household entries")
           PY
 
       - id: deploy
@@ -118,11 +106,32 @@ jobs:
           service: nano-webhook
           region: us-central1
           source: ./app
-          env_vars_file: cloudrun-env.json
+          env_vars: |
+            VERIFY_TOKEN=${{ secrets.VERIFY_TOKEN }}
+            PHONE_NUMBER_ID=${{ secrets.PHONE_NUMBER_ID }}
+            HOUSEHOLD_MEMBERS=${{ secrets.HOUSEHOLD_MEMBERS }}
+            HOUSEHOLD_TIMEZONE=${{ secrets.HOUSEHOLD_TIMEZONE }}
+            RECEIPTS_BUCKET=${{ secrets.RECEIPTS_BUCKET }}
+            TASKS_TARGET_URL=${{ secrets.TASKS_TARGET_URL }}
+            TASKS_INVOKER_SA=${{ secrets.TASKS_INVOKER_SA }}
+            REQUIRE_SIGNATURE=${{ vars.REQUIRE_SIGNATURE || 'false' }}
+            BQ_DATASET=nano
+            TASK_BACKEND=cloud_tasks
+            TASKS_QUEUE=nano-webhook-work
+            TASKS_LOCATION=us-central1
+            VERTEX_LOCATION=us-central1
+            DEFAULT_CURRENCY=EUR
+            LOG_LEVEL=INFO
           secrets: |
             WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest
             WHATSAPP_APP_SECRET=whatsapp-app-secret:latest
-          flags: --service-account=${{ secrets.GCP_RUNTIME_SA }} --allow-unauthenticated
+          # --clear-base-image drops the automatic base image that buildpacks
+          # attached on earlier deploys. Cloud Run refuses a Dockerfile build
+          # while one is still associated with the service.
+          flags: >-
+            --service-account=${{ secrets.GCP_RUNTIME_SA }}
+            --allow-unauthenticated
+            --clear-base-image
 
       # A deploy that produces a service which cannot answer is worse than a
       # failed deploy, because Meta keeps posting to it.
