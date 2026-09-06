@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .env
 .venv/
+context.md
+project-log.md
