@@ -30,6 +30,13 @@ jobs:
           service: nano-webhook
           region: us-central1
           source: ./app
+          # WARNING: `env_vars` is COMMA-delimited. Any value containing a comma is
+          # silently split into extra bogus variables. HOUSEHOLD_NUMBERS is exactly
+          # that shape and is currently mangled in production — it is migrated to a
+          # comma-safe mechanism in the webhook-hardening PR, together with the fix
+          # that stops an undeliverable recipient from failing the request.
+          # Do not "fix" the variable here first: on the current code a newly
+          # reachable, permanently-blocked number would raise inside the handler.
           env_vars: |
             VERIFY_TOKEN=${{ secrets.VERIFY_TOKEN }}
             PHONE_NUMBER_ID=${{ secrets.PHONE_NUMBER_ID }}

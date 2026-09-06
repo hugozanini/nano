@@ -1,0 +1,39 @@
+[project]
+name = "nano"
+version = "0.1.0"
+description = "WhatsApp grocery assistant on Cloud Run, Gemini, Firestore and an Iceberg lakehouse"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "B008",  # FastAPI Depends() in defaults is idiomatic
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.pytest.ini_options]
+pythonpath = ["app"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:nano.*"]
+markers = [
+    "integration: talks to real GCP; requires ADC and the nano_test dataset (deselect with '-m \"not integration\"')",
+]
+addopts = "-q --strict-markers"

@@ -1,0 +1,10 @@
+# Local dev + CI tooling. Not shipped to Cloud Run.
+-r app/requirements.txt
+
+pytest
+pytest-asyncio
+pytest-cov
+httpx              # FastAPI TestClient transport
+responses          # stub outbound `requests` calls
+freezegun          # deterministic dates in tests
+ruff
