@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 # resilient to that class of mangling instead of silently messaging a bad number.
 _WRAPPERS = "\"' \t\r\n"
 
+# Accepted between household entries. Semicolon is preferred and is what the
+# deploy pipeline uses, precisely because a comma is the one character the CI
+# action treats as a delimiter. Comma stays supported so an existing secret,
+# or a hand-set local value, keeps working.
+_ENTRY_SEPARATORS = ",;|"
+
 
 class ConfigError(RuntimeError):
     """Raised at startup when configuration is missing or unusable."""
@@ -34,11 +40,22 @@ def _digits_only(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit())
 
 
+def _split_entries(raw: str) -> list[str]:
+    """Split on any accepted separator, so the value survives either convention."""
+    normalised = _clean(raw)
+    for separator in _ENTRY_SEPARATORS[1:]:
+        normalised = normalised.replace(separator, ",")
+    return normalised.split(",")
+
+
 def parse_household(members_raw: str, numbers_raw: str) -> dict[str, str]:
     """Build {phone_number: display_name} from either supported env var.
 
-    Preferred form (HOUSEHOLD_MEMBERS):  "<number>:alex,<number>:sam"
-    Legacy form    (HOUSEHOLD_NUMBERS):  "<number>,<number>"
+    Preferred form (HOUSEHOLD_MEMBERS):  "<number>:alex;<number>:sam"
+    Legacy form    (HOUSEHOLD_NUMBERS):  "<number>;<number>"
+
+    Entries may be separated by ";", "|" or ",". Semicolon is what the deploy
+    pipeline uses, because a comma is the character the CI action splits on.
 
     Every value is stripped of stray quotes and reduced to digits, because a
     number that arrives as '"15550100001' must not be treated as a distinct
@@ -46,7 +63,7 @@ def parse_household(members_raw: str, numbers_raw: str) -> dict[str, str]:
     """
     household: dict[str, str] = {}
 
-    for entry in _clean(members_raw).split(","):
+    for entry in _split_entries(members_raw):
         entry = _clean(entry)
         if not entry:
             continue
@@ -57,7 +74,7 @@ def parse_household(members_raw: str, numbers_raw: str) -> dict[str, str]:
         household[number] = _clean(name) or f"member_{len(household) + 1}"
 
     if not household:
-        for entry in _clean(numbers_raw).split(","):
+        for entry in _split_entries(numbers_raw):
             number = _digits_only(entry)
             if number:
                 household[number] = f"member_{len(household) + 1}"
