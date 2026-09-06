@@ -94,28 +94,59 @@ class FakeCollectionReference:
 class FakeTransaction:
     """Good enough for the read-modify-write patterns Nano uses.
 
-    The real client retries on contention; the fake executes inline, which is
-    what a single-threaded unit test wants. Concurrency is covered separately by
-    exercising create() directly.
+    Supports the context-manager protocol, which is how `store._mutate` drives
+    both this and the real `google.cloud.firestore.Transaction`: `__enter__`
+    begins, `__exit__` commits on success and rolls back on an exception.
+
+    The real client also retries on contention; the fake executes inline, which
+    is what a single-threaded unit test wants. Concurrent claiming is covered
+    separately by exercising create() directly.
     """
 
     def __init__(self, client: FakeFirestoreClient):
         self._client = client
+        self.committed = False
+        self.rolled_back = False
+        self._pending: list[tuple[str, str, dict[str, Any] | None]] = []
 
     def __call__(self, func, *args, **kwargs):
-        return func(self, *args, **kwargs)
+        with self:
+            return func(self, *args, **kwargs)
+
+    def __enter__(self) -> FakeTransaction:
+        self._pending = []
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is not None:
+            # Roll back: discard buffered writes, mirroring the real client.
+            self.rolled_back = True
+            self._pending = []
+            return False
+        for op, path, data in self._pending:
+            ref = FakeDocumentReference(self._client, path)
+            if op == "set":
+                ref.set(data or {})
+            elif op == "update":
+                ref.update(data or {})
+            elif op == "delete":
+                ref.delete()
+        self._pending = []
+        self.committed = True
+        return False
 
     def get(self, ref: FakeDocumentReference) -> FakeDocumentSnapshot:
         return ref.get()
 
     def set(self, ref: FakeDocumentReference, data: dict[str, Any], merge: bool = False) -> None:
-        ref.set(data, merge=merge)
+        # Buffered until commit, so a failure mid-transaction writes nothing.
+        self._pending.append(("set", ref.path, data))
 
     def update(self, ref: FakeDocumentReference, data: dict[str, Any]) -> None:
-        ref.update(data)
+        self._pending.append(("update", ref.path, data))
 
     def delete(self, ref: FakeDocumentReference) -> None:
-        ref.delete()
+        self._pending.append(("delete", ref.path, None))
 
 
 class FakeFirestoreClient:

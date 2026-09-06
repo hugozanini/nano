@@ -167,3 +167,75 @@ def app_secret() -> str:
 def receipt() -> ReceiptFixture:
     """A synthetic Catalan-language receipt: 8 items, EUR 21.70, one non-grocery."""
     return ReceiptFixture()
+
+
+# --------------------------------------------------------------------------
+# The application, wired to fakes
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def nano_app(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_firestore: FakeFirestoreClient,
+    fake_bq: FakeBigQueryClient,
+    fake_gemini: FakeGeminiModel,
+    fake_whatsapp: FakeWhatsAppClient,
+):
+    """A real FastAPI app with every outbound dependency replaced.
+
+    Routing, signature checking, dedupe, threadpool behaviour and error handling
+    are all the production code paths; only the four external services are fake.
+    TASK_BACKEND is `inline`, so background work runs through FastAPI's
+    BackgroundTasks and completes before TestClient returns.
+    """
+    from nano import clients, config, gemini
+    from nano import whatsapp as wa_module
+
+    config.reset_settings_cache()
+    clients.reset_clients()
+    gemini.reset_models()
+
+    monkeypatch.setattr(clients, "firestore_client", lambda: fake_firestore)
+    monkeypatch.setattr(clients, "bigquery_client", lambda: fake_bq)
+    monkeypatch.setattr(clients, "vertex_initialised", lambda: True)
+
+    # store/purchases/history import the getters by name, so patch them there too.
+    from nano import history, purchases, store
+
+    monkeypatch.setattr(store, "firestore_client", lambda: fake_firestore)
+    monkeypatch.setattr(purchases, "bigquery_client", lambda: fake_bq)
+    monkeypatch.setattr(history, "bigquery_client", lambda: fake_bq)
+
+    monkeypatch.setattr(gemini, "classifier_model", lambda: fake_gemini)
+    monkeypatch.setattr(gemini, "extraction_model", lambda: fake_gemini)
+
+    monkeypatch.setattr(
+        wa_module, "send_text", lambda to, text, s=None: fake_whatsapp.send_text(to, text)
+    )
+    monkeypatch.setattr(
+        wa_module, "mark_as_read", lambda mid, s=None: fake_whatsapp.mark_as_read(mid)
+    )
+    monkeypatch.setattr(
+        wa_module, "download_media", lambda mid, s=None: fake_whatsapp.download_media(mid)
+    )
+    monkeypatch.setattr(
+        wa_module,
+        "notify",
+        lambda numbers, text, s=None: {n: fake_whatsapp.send_text(n, text) for n in numbers},
+    )
+
+    # Fallback classification, used only when a test queues nothing of its own,
+    # so tests about transport need not script an intent while tests about
+    # intent still win.
+    fake_gemini.set_default_function_call("add_items", items=["coffee"])
+    fake_whatsapp.stage_media("MEDIA_1", b"\xff\xd8fake-jpeg-bytes", "image/jpeg")
+
+    from nano.app import create_app
+
+    app = create_app()
+    yield app
+
+    config.reset_settings_cache()
+    clients.reset_clients()
+    gemini.reset_models()

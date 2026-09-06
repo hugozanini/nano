@@ -12,8 +12,38 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: deploy-cloudrun
+  cancel-in-progress: false
+
 jobs:
+  test:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv venv --python 3.12 .venv
+
+      - name: Install dependencies
+        run: uv pip install --python .venv/bin/python -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+
+      - name: Unit tests
+        run: .venv/bin/python -m pytest tests/unit -q
+
   deploy:
+    name: Deploy
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,22 +55,90 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
 
-      - uses: google-github-actions/deploy-cloudrun@v2
+      # The `env_vars` input is comma-or-newline delimited and requires escaping
+      # for values containing a separator. A comma-separated HOUSEHOLD_NUMBERS
+      # was therefore silently shredded in production into one truncated
+      # variable plus two bogus ones named after the remaining phone numbers,
+      # so Nano only ever messaged one person. `env_vars_file` in JSON needs no
+      # escaping at all, and secrets reach this step through `env:` rather than
+      # shell interpolation so nothing has to be quoted correctly by hand.
+      - name: Compose environment file
+        env:
+          VERIFY_TOKEN: ${{ secrets.VERIFY_TOKEN }}
+          PHONE_NUMBER_ID: ${{ secrets.PHONE_NUMBER_ID }}
+          HOUSEHOLD_MEMBERS: ${{ secrets.HOUSEHOLD_MEMBERS }}
+          HOUSEHOLD_TIMEZONE: ${{ secrets.HOUSEHOLD_TIMEZONE }}
+          RECEIPTS_BUCKET: ${{ secrets.RECEIPTS_BUCKET }}
+          TASKS_TARGET_URL: ${{ secrets.TASKS_TARGET_URL }}
+          TASKS_INVOKER_SA: ${{ secrets.TASKS_INVOKER_SA }}
+          # Enforcement stays OFF until the real Meta App Secret is in Secret
+          # Manager. Turning it on with a placeholder would 403 every genuine
+          # webhook and make Meta redeliver everything. Flip the repository
+          # variable to 'true' once the secret holds the real value.
+          REQUIRE_SIGNATURE: ${{ vars.REQUIRE_SIGNATURE || 'false' }}
+          BQ_DATASET: nano
+          TASK_BACKEND: cloud_tasks
+          TASKS_QUEUE: nano-webhook-work
+          TASKS_LOCATION: us-central1
+          VERTEX_LOCATION: us-central1
+          DEFAULT_CURRENCY: EUR
+          LOG_LEVEL: INFO
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          keys = [
+              "VERIFY_TOKEN", "PHONE_NUMBER_ID", "HOUSEHOLD_MEMBERS",
+              "HOUSEHOLD_TIMEZONE", "RECEIPTS_BUCKET", "TASKS_TARGET_URL",
+              "TASKS_INVOKER_SA", "BQ_DATASET", "TASK_BACKEND", "TASKS_QUEUE",
+              "REQUIRE_SIGNATURE",
+              "TASKS_LOCATION", "VERTEX_LOCATION", "DEFAULT_CURRENCY", "LOG_LEVEL",
+          ]
+          env = {k: os.environ[k] for k in keys if os.environ.get(k)}
+
+          missing = [k for k in ("VERIFY_TOKEN", "PHONE_NUMBER_ID", "HOUSEHOLD_MEMBERS") if k not in env]
+          if missing:
+              raise SystemExit(f"missing required secrets: {', '.join(missing)}")
+
+          # Fail the deploy rather than ship a mangled household list.
+          members = env["HOUSEHOLD_MEMBERS"]
+          if members != members.strip().strip('"\''):
+              raise SystemExit("HOUSEHOLD_MEMBERS has stray quotes; check the secret's value")
+
+          with open("cloudrun-env.json", "w") as fh:
+              json.dump(env, fh, indent=2)
+
+          print(f"composed {len(env)} environment variables")
+          print("keys:", ", ".join(sorted(env)))
+          PY
+
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: nano-webhook
           region: us-central1
           source: ./app
-          # WARNING: `env_vars` is COMMA-delimited. Any value containing a comma is
-          # silently split into extra bogus variables. HOUSEHOLD_NUMBERS is exactly
-          # that shape and is currently mangled in production — it is migrated to a
-          # comma-safe mechanism in the webhook-hardening PR, together with the fix
-          # that stops an undeliverable recipient from failing the request.
-          # Do not "fix" the variable here first: on the current code a newly
-          # reachable, permanently-blocked number would raise inside the handler.
-          env_vars: |
-            VERIFY_TOKEN=${{ secrets.VERIFY_TOKEN }}
-            PHONE_NUMBER_ID=${{ secrets.PHONE_NUMBER_ID }}
-            HOUSEHOLD_NUMBERS="${{ secrets.HOUSEHOLD_NUMBERS }}"
+          env_vars_file: cloudrun-env.json
           secrets: |
             WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest
+            WHATSAPP_APP_SECRET=whatsapp-app-secret:latest
           flags: --service-account=${{ secrets.GCP_RUNTIME_SA }} --allow-unauthenticated
+
+      # A deploy that produces a service which cannot answer is worse than a
+      # failed deploy, because Meta keeps posting to it.
+      - name: Smoke test the new revision
+        run: |
+          set -euo pipefail
+          URL="${{ steps.deploy.outputs.url }}"
+          echo "checking ${URL}/healthz"
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o /tmp/health.txt -w '%{http_code}' "${URL}/healthz" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "healthy: $(cat /tmp/health.txt)"
+              exit 0
+            fi
+            echo "attempt ${attempt}: HTTP ${code}; retrying"
+            sleep 5
+          done
+          echo "service did not become healthy"
+          exit 1
