@@ -142,6 +142,42 @@ class TestAskingWhatSomethingIsIsALookup:
         assert args.get("query_type") == expected
 
 
+class TestItCanAnswerForItself:
+    """Someone asked which AI model Nano uses; it filed a feature request.
+
+    Same shape as the item lookup: the model name is in configuration, so this
+    was never a capability gap. The routing matters more than usual here,
+    because the answers are hand-written — a question that misses `about_nano`
+    reaches a path that would improvise, and improvising about your own
+    architecture produces plausible fiction.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "topic"),
+        [
+            ("which AI model do you use?", "which_model"),
+            ("what model are you running on?", "which_model"),
+            ("how do you work?", "how_it_works"),
+            ("do you keep my messages?", "data_privacy"),
+            ("are you training on our chats?", "data_privacy"),
+            ("who built you?", "who_built_it"),
+        ],
+    )
+    def test_a_question_about_nano_reaches_nano(self, wired, text, topic):
+        intent, args = classify(text)
+        assert intent == "about_nano", f"{text!r} became {intent}"
+        assert args.get("topic") == topic
+
+    def test_it_is_never_filed_as_a_missing_feature(self, wired):
+        intent, _ = classify("which AI model do you use?")
+        assert intent not in {"cannot_answer", "request_feature"}
+
+    @pytest.mark.parametrize("text", ["what can you do?", "help"])
+    def test_asking_what_it_can_do_is_still_help(self, wired, text):
+        """`help` is about groceries; `about_nano` is about the assistant."""
+        assert classify(text)[0] == "help"
+
+
 class TestItDoesNotAskAboutClearMessages:
     """The guard that matters most.
 
