@@ -15,6 +15,8 @@ on apples?" could never match `poma golden 1kg` — the words share no letters.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from nano import canonicalise
 
@@ -157,3 +159,53 @@ class TestCanonicaliseQuery:
     def test_a_failure_still_yields_something_matchable(self):
         model = FakeGeminiModel().raises(RuntimeError("down"))
         assert canonicalise.canonicalise_query("POMA GOLDEN 1KG", model=model) == "poma golden"
+
+
+class TestPromptExamplesAreCorrect:
+    """Guard the worked examples in the prompt.
+
+    A find-and-replace over the prompt prose once rewrote the left-hand side of
+    an example and left the right-hand side untouched, producing the
+    instruction `"OUS M-12" -> "bacon"`. The model obeyed it, and at temperature
+    0 it obeyed it every time — so the symptom looked like a model failure while
+    the cause was a false instruction we had written ourselves.
+
+    A wrong example is worse than no example, so each is asserted against a
+    known-correct translation here.
+    """
+
+    GROUND_TRUTH: ClassVar[dict[str, str]] = {
+        "POMA GOLDEN 1KG": "apple",  # poma = apple (ca)
+        "ARROS RODO 1KG": "rice",  # arros = rice (ca)
+        "LLET SENCERA 1L": "milk",  # llet = milk (ca)
+        "OUS M-12": "egg",  # ous = eggs (ca)
+        "PA INTEGRAL": "bread",  # pa = bread (ca)
+        "IOGURT NATURAL P-4": "yogurt",  # iogurt = yogurt (ca)
+        "PILES AAA P-4": "battery",  # piles = batteries (ca)
+    }
+
+    def test_every_example_translates_correctly(self):
+        for source, expected in self.GROUND_TRUTH.items():
+            actual = canonicalise.TRANSLATION_EXAMPLES.get(source)
+            assert actual == expected, (
+                f"the prompt teaches {source!r} -> {actual!r}, but it means {expected!r}. "
+                "The model will follow the prompt, so this corrupts every receipt."
+            )
+
+    def test_no_example_is_left_unverified(self):
+        """Adding an example without a ground-truth entry must fail here."""
+        assert set(canonicalise.TRANSLATION_EXAMPLES) == set(self.GROUND_TRUTH)
+
+    def test_examples_reach_the_prompt(self):
+        model = FakeGeminiModel().queue_json([{"canonical": "milk", "category": "dairy"}])
+        canonicalise.canonicalise_items(["LLET SENCERA 1L"], model=model)
+
+        prompt = model.calls[-1].parts[0]
+        assert '"OUS M-12" -> "egg"' in prompt
+        assert "bacon" not in prompt
+
+    def test_targets_are_singular_and_lowercase(self):
+        """The prompt asks for singular lowercase; the examples must model it."""
+        for target in canonicalise.TRANSLATION_EXAMPLES.values():
+            assert target == target.lower()
+            assert not target.endswith("s") or target in {"couscous", "asparagus"}

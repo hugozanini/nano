@@ -379,3 +379,98 @@ class TestDuplicateReceiptDetection:
         post(client, payload, app_secret)
 
         assert fake_bq.count_matching("INSERT INTO `nano_test.purchases`") == 1
+
+
+class TestReceiptOriginIsRecorded:
+    """Provenance must reach the row, not just the log.
+
+    A receipt's country is inferred from its tax table where possible, and the
+    evidence and confidence are stored alongside so analysis can tell a
+    fingerprint from a guess.
+    """
+
+    def _catalan_receipt(self, receipt):
+        payload = receipt.as_dict()
+        payload.update(
+            {
+                "receipt_language": "ca",
+                "tax_rates": [4, 10, 21],
+                "tax_id": "A12345674",
+                "store_city": "",
+                "store_address": "Carrer Example 1",
+                "country_guess": "AD",  # deliberately wrong; VAT should win
+            }
+        )
+        return payload
+
+    def _script(self, fake_gemini, payload, item_count):
+        fake_gemini.queue_json(payload)
+        fake_gemini.queue_json([{"canonical": "milk", "category": "dairy"}] * item_count)
+
+    def test_country_comes_from_the_tax_table_not_the_model_guess(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_bq, receipt
+    ):
+        self._script(fake_gemini, self._catalan_receipt(receipt), len(receipt.items))
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [])
+
+        post(client, image_message(message_id="wamid.CA1"), app_secret)
+
+        insert = fake_bq.statements_matching("INSERT INTO `nano_test.purchases`")[-1]
+        assert insert.param("country_code") == "ES", "VAT 4/10/21 should outrank a model guess"
+        assert insert.param("location_confidence") == "high"
+        assert "VAT" in insert.param("location_evidence")
+
+    def test_region_is_recorded_but_city_is_not_invented(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_bq, receipt
+    ):
+        """The design's central rule: no city unless it was printed."""
+        self._script(fake_gemini, self._catalan_receipt(receipt), len(receipt.items))
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [])
+
+        post(client, image_message(message_id="wamid.CA2"), app_secret)
+
+        insert = fake_bq.statements_matching("INSERT INTO `nano_test.purchases`")[-1]
+        assert insert.param("region") == "Catalonia"
+        assert insert.param("city_printed") == ""
+        assert insert.param("city_inferred") == ""
+
+    def test_a_printed_city_is_stored_as_printed(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_bq, receipt
+    ):
+        payload = self._catalan_receipt(receipt)
+        payload["store_city"] = "Girona"
+        self._script(fake_gemini, payload, len(receipt.items))
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [])
+
+        post(client, image_message(message_id="wamid.CA3"), app_secret)
+
+        insert = fake_bq.statements_matching("INSERT INTO `nano_test.purchases`")[-1]
+        assert insert.param("city_printed") == "Girona"
+
+    def test_tax_rates_and_language_are_stored(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_bq, receipt
+    ):
+        self._script(fake_gemini, self._catalan_receipt(receipt), len(receipt.items))
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [])
+
+        post(client, image_message(message_id="wamid.CA4"), app_secret)
+
+        insert = fake_bq.statements_matching("INSERT INTO `nano_test.purchases`")[-1]
+        assert insert.param("receipt_language") == "ca"
+        # The SDK coerces NUMERIC parameters to Decimal, as it does with DATE.
+        assert [float(r) for r in insert.param("tax_rates")] == [4.0, 10.0, 21.0]
+        assert insert.param("tax_id") == "A12345674"
+
+    def test_a_receipt_with_no_locale_signals_still_logs(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_bq, receipt
+    ):
+        """Missing provenance must never cost us the purchase."""
+        self._script(fake_gemini, receipt.as_dict(), len(receipt.items))
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [])
+
+        post(client, image_message(message_id="wamid.BARE"), app_secret)
+
+        assert fake_bq.count_matching("INSERT INTO `nano_test.purchases`") == 1
+        insert = fake_bq.statements_matching("INSERT INTO `nano_test.purchases`")[-1]
+        assert insert.param("country_code") == ""
+        assert insert.param("location_confidence") == "none"

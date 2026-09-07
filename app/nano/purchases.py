@@ -146,6 +146,10 @@ def log_purchase(
     items: list[dict[str, Any]],
     receipt_uri: str = "",
     settings: Settings | None = None,
+    location: Any = None,
+    store_address: str = "",
+    tax_id: str = "",
+    tax_rates: list | None = None,
 ) -> tuple[str, bool]:
     """Write one purchase and its line items.
 
@@ -171,13 +175,19 @@ def log_purchase(
     now = datetime.datetime.now(datetime.UTC)
     purchased_at = f"{purchase_date}T00:00:00Z"
 
+    # Provenance travels with the row: an analyst has to be able to tell a
+    # tax-table fingerprint from a guess made off the language alone.
     client.query(
         f"""
         INSERT INTO `{settings.table("purchases")}`
         (purchase_id, purchased_at, store_name, total_amount,
-         currency, receipt_image_uri, created_at)
-        VALUES (@purchase_id, @purchased_at, @store_name, @total_amount,
-                @currency, @receipt_image_uri, @created_at)
+         currency, receipt_image_uri, created_at,
+         receipt_language, country_code, region, city_printed, city_inferred,
+         location_confidence, location_evidence, store_address, tax_id, tax_rates)
+        SELECT @purchase_id, @purchased_at, @store_name, @total_amount,
+               @currency, @receipt_image_uri, @created_at,
+               @receipt_language, @country_code, @region, @city_printed, @city_inferred,
+               @location_confidence, @location_evidence, @store_address, @tax_id, @tax_rates
         """,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
@@ -188,6 +198,30 @@ def log_purchase(
                 bigquery.ScalarQueryParameter("currency", "STRING", currency),
                 bigquery.ScalarQueryParameter("receipt_image_uri", "STRING", receipt_uri),
                 bigquery.ScalarQueryParameter("created_at", "TIMESTAMP", now),
+                bigquery.ScalarQueryParameter(
+                    "receipt_language", "STRING", getattr(location, "language", "")
+                ),
+                bigquery.ScalarQueryParameter(
+                    "country_code", "STRING", getattr(location, "country_code", "")
+                ),
+                bigquery.ScalarQueryParameter("region", "STRING", getattr(location, "region", "")),
+                bigquery.ScalarQueryParameter(
+                    "city_printed", "STRING", getattr(location, "city_printed", "")
+                ),
+                bigquery.ScalarQueryParameter(
+                    "city_inferred", "STRING", getattr(location, "city_inferred", "")
+                ),
+                bigquery.ScalarQueryParameter(
+                    "location_confidence", "STRING", getattr(location, "confidence", "")
+                ),
+                bigquery.ScalarQueryParameter(
+                    "location_evidence", "STRING", getattr(location, "evidence_text", "")
+                ),
+                bigquery.ScalarQueryParameter("store_address", "STRING", store_address),
+                bigquery.ScalarQueryParameter("tax_id", "STRING", tax_id),
+                bigquery.ArrayQueryParameter(
+                    "tax_rates", "NUMERIC", [str(r) for r in (tax_rates or [])]
+                ),
             ]
         ),
     ).result()

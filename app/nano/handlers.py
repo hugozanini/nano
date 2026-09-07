@@ -15,7 +15,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from nano import canonicalise, events, gemini, history, purchases, receipts, store, whatsapp
+from nano import (
+    canonicalise,
+    events,
+    gemini,
+    history,
+    locale,
+    purchases,
+    receipts,
+    store,
+    whatsapp,
+)
 from nano.config import Settings, get_settings
 from nano.logging_setup import bind_request, log_with, redact_number
 from nano.whatsapp import InboundMessage
@@ -301,6 +311,27 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
         log_with(logger, logging.WARNING, "adjusted the receipt date", detail=note)
 
     currency = receipts.normalise_currency(str(extracted.get("currency", "")), settings)
+
+    # The model reports what it saw; this decides what to believe. A tax table
+    # of 4/10/21 outranks "the text looks Catalan", and a city is only recorded
+    # when it was actually printed.
+    where = locale.infer_location(
+        language=str(extracted.get("receipt_language", "")),
+        currency=currency,
+        tax_rates=extracted.get("tax_rates"),
+        tax_id=str(extracted.get("tax_id", "")),
+        printed_city=str(extracted.get("store_city", "")),
+        model_country=str(extracted.get("country_guess", "")),
+    )
+    log_with(
+        logger,
+        logging.INFO,
+        "inferred receipt origin",
+        country=where.country_code,
+        region=where.region,
+        confidence=where.confidence,
+        evidence=where.evidence_text,
+    )
     store_name = str(extracted.get("store_name") or "unknown")
     items: list[dict[str, Any]] = list(extracted.get("items") or [])
 
@@ -349,6 +380,10 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
             items=items,
             receipt_uri=receipt_uri,
             settings=settings,
+            location=where,
+            store_address=str(extracted.get("store_address", "")),
+            tax_id=str(extracted.get("tax_id", "")),
+            tax_rates=locale.parse_rates(extracted.get("tax_rates")),
         )
     except Exception as exc:
         log_with(logger, logging.ERROR, "could not record purchase", error=str(exc))
