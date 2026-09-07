@@ -23,6 +23,7 @@ from nano import (
     history,
     locale,
     purchases,
+    question_log,
     receipts,
     store,
     stores,
@@ -250,6 +251,12 @@ def _apply_intent(
         return HELP_REPLY
 
     if intent == "cannot_answer":
+        # The most direct product signal there is: someone wanted something and
+        # did not get it. Recorded so the backlog can be built from real demand.
+        with question_log.track(message.text, sender_name, settings) as entry:
+            entry.resolution = question_log.UNANSWERABLE
+            entry.answered = False
+            entry.failure_reason = str(args.get("request") or "")
         reply = _cannot_answer_reply(str(args.get("request") or ""))
         _reply(message.sender, reply, settings)
         return reply
@@ -268,15 +275,19 @@ def _apply_intent(
         return reply
 
     if intent == "query_history":
-        raw_item = args.get("item_name")
-        item = canonicalise.canonicalise_query(raw_item) if raw_item else None
-        reply = history.answer_history_query(
-            args.get("query_type"),
-            args.get("period", "this_month"),
-            item or raw_item,
-            settings,
-            display_name=raw_item,
-        )
+        with question_log.track(message.text, sender_name, settings) as entry:
+            raw_item = args.get("item_name")
+            item = canonicalise.canonicalise_query(raw_item) if raw_item else None
+            reply = history.answer_history_query(
+                args.get("query_type"),
+                args.get("period", "this_month"),
+                item or raw_item,
+                settings,
+                display_name=raw_item,
+            )
+            entry.resolution = question_log.TEMPLATE
+            entry.template_name = str(args.get("query_type") or "unknown")
+            entry.answered = True
         _reply(message.sender, reply, settings)
         return reply
 
