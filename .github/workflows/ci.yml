@@ -10,6 +10,12 @@ on:
         description: 'Also run integration tests against the nano_test dataset'
         type: boolean
         default: false
+  # Weekly, because the integration tier is the only thing that notices the
+  # world changing underneath us: Gemini output drifting between model
+  # versions, a BigQuery or Firestore behaviour changing, the ECB feed moving.
+  # None of that is caused by a commit, so nothing else would ever catch it.
+  schedule:
+    - cron: '0 6 * * 1'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -49,9 +55,11 @@ jobs:
   integration:
     name: Integration tests (nano_test)
     runs-on: ubuntu-latest
-    # Opt-in only: these hit real BigQuery, Firestore and Vertex AI, which costs
-    # money and is rate-limited. Never runs automatically on a PR.
-    if: github.event_name == 'workflow_dispatch' && inputs.run_integration
+    # Not on a PR: these hit real BigQuery, Firestore and Vertex AI, which costs
+    # money and is rate-limited. On demand, or weekly to catch drift.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_integration)
     needs: lint-and-test
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +73,12 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+          # A dedicated identity, not the deploy account. It holds only what the
+          # tests need: BigQuery job-runner plus WRITER on the nano_test dataset
+          # alone, Firestore, Vertex AI, and the receipts bucket. It has no
+          # access to the production `nano` dataset at all, so a compromised CI
+          # token cannot reach the household's real purchase history.
+          service_account: ${{ secrets.GCP_CI_TESTS_SA }}
 
       - name: Set up Python
         run: uv venv --python 3.12 .venv
@@ -78,4 +91,5 @@ jobs:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           BQ_DATASET: nano_test
           FIRESTORE_PREFIX: nano_test_
+          RECEIPTS_BUCKET: ${{ secrets.RECEIPTS_BUCKET }}
         run: .venv/bin/python -m pytest tests/integration -m integration -q
