@@ -10,9 +10,10 @@ Giving a language model SQL access to the household's purchase history needs
 real containment, not a prompt asking it nicely. Five layers, each independent
 and each verified:
 
-1. **A read-only identity.** Queries run as `nano-analytics`, impersonated from
-   the runtime account, holding `bigquery.jobUser` and READER on the `nano`
-   dataset and nothing else. Verified: a `DELETE` is refused with
+1. **A read-only identity.** Queries run as a dedicated analytics service
+   account, impersonated from the runtime account, holding `bigquery.jobUser`
+   and READER on the one dataset and nothing else. Verified: a `DELETE` is
+   refused with
    `bigquery.tables.updateData denied`, and another dataset is unreachable. This
    holds even if every check below is bypassed, because IAM enforces it rather
    than our code.

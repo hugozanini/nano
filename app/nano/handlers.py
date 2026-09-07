@@ -17,6 +17,7 @@ from typing import Any
 
 from nano import (
     analytics,
+    backlog,
     canonicalise,
     events,
     fx,
@@ -271,17 +272,27 @@ def _apply_intent(
 
     if intent == "cannot_answer":
         # The most direct product signal there is: someone wanted something and
-        # did not get it. Recorded so the backlog can be built from real demand.
+        # did not get it. Captured at the moment it happened, which is the only
+        # time anyone reliably reports it.
+        requested = str(args.get("request") or message.text)
         with question_log.track(message.text, sender_name, settings) as entry:
             entry.resolution = question_log.UNANSWERABLE
             entry.answered = False
-            entry.failure_reason = str(args.get("request") or "")
+            entry.failure_reason = requested
+        backlog.record(requested, sender_name, backlog.UNANSWERED, settings)
         reply = _cannot_answer_reply(str(args.get("request") or ""))
         _reply(message.sender, reply, settings)
         return reply
 
     if intent == "request_feature":
+        requested = str(args.get("request") or message.text)
+        backlog.record(requested, sender_name, backlog.EXPLICIT, settings)
         reply = _feature_request_reply(str(args.get("request") or ""))
+        _reply(message.sender, reply, settings)
+        return reply
+
+    if intent == "list_requests":
+        reply = backlog.format_for_chat(backlog.open_requests(settings=settings))
         _reply(message.sender, reply, settings)
         return reply
 

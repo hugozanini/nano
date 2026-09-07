@@ -206,6 +206,15 @@ INTENT_SPECS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "list_requests",
+        "description": (
+            "The user wants to see the feature requests already made, e.g. 'what "
+            "have we asked for?', 'what's on the backlog', 'what features did I "
+            "request'."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
         "name": "unclear",
         "description": (
             "The message cannot be understood at all — a typo, a fragment, or "

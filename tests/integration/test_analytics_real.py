@@ -8,11 +8,16 @@ really cannot write. Both are properties of the platform, not of our code.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 pytestmark = pytest.mark.integration
 
-ANALYTICS_SA = "nano-analytics@nano-grocery-bot.iam.gserviceaccount.com"
+# Built from the project and a configurable prefix rather than written out, so
+# no real identifier lives in the repository.
+SA_PREFIX = os.environ.get("NANO_RESOURCE_PREFIX", "nano")
+ANALYTICS_SA_TEMPLATE = SA_PREFIX + "-analytics@{project}.iam.gserviceaccount.com"
 
 
 @pytest.fixture
@@ -66,11 +71,12 @@ class TestBigQueryRefusesBeforeExecuting:
         assert not ok
         assert reason
 
-    def test_a_query_against_another_dataset_is_refused(self, wired):
-        """The production dataset must be unreachable from a test run."""
+    def test_a_query_against_another_dataset_is_refused(self, wired, dataset):
+        """A test run must not be able to reach the production dataset."""
         from nano import analytics
 
-        ok, reason, _ = analytics.validate("SELECT COUNT(*) FROM `nano.purchases`", wired)
+        production = dataset.removesuffix("_test")
+        ok, reason, _ = analytics.validate(f"SELECT COUNT(*) FROM `{production}.purchases`", wired)
         assert not ok
         assert "outside" in reason
 
@@ -92,17 +98,18 @@ class TestTheAnalyticsIdentityCannotWrite:
         from google.auth import impersonated_credentials
         from google.cloud import bigquery
 
+        analytics_sa = ANALYTICS_SA_TEMPLATE.format(project=project_id)
         source, _ = google.auth.default()
         try:
             credentials = impersonated_credentials.Credentials(
                 source_credentials=source,
-                target_principal=ANALYTICS_SA,
+                target_principal=analytics_sa,
                 target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
             )
             client = bigquery.Client(project=project_id, credentials=credentials)
             list(client.query("SELECT 1").result())
         except Exception as exc:
-            pytest.skip(f"cannot impersonate {ANALYTICS_SA}: {exc}")
+            pytest.skip(f"cannot impersonate the analytics identity: {exc}")
         return client
 
     def test_it_can_read_the_analysis_views(self, read_only_client):
