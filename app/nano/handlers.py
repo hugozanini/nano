@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from nano import (
+    about,
     analytics,
     backlog,
     canonicalise,
@@ -378,6 +379,11 @@ def _apply_intent(
     if intent == "undo":
         reply = _undo(message.sender, sender_name, message.id, settings)
         _broadcast(reply, settings)
+        return reply
+
+    if intent == "about_nano":
+        reply = about.answer(str(args.get("topic") or ""), settings)
+        _reply(message.sender, reply, settings)
         return reply
 
     if intent == "help":
