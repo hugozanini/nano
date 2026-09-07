@@ -140,6 +140,27 @@ def _env(key: str, default: str = "") -> str:
     return _clean(os.environ.get(key, default))
 
 
+def detect_project_id() -> str:
+    """Resolve the GCP project when the environment does not name it.
+
+    Cloud Run does **not** inject GOOGLE_CLOUD_PROJECT. The bootstrap only
+    worked because `vertexai.init(project=None)` quietly falls back to the
+    project behind the ambient credentials; anything that needed the value
+    explicitly would have failed. Resolving it here means the service
+    self-configures instead of depending on someone remembering to set it.
+
+    Returns "" rather than raising: the caller decides whether it was required.
+    """
+    try:
+        import google.auth
+
+        _, project = google.auth.default()
+        return project or ""
+    except Exception as exc:  # pragma: no cover - depends on ambient credentials
+        logger.warning("could not detect the project id from credentials: %s", exc)
+        return ""
+
+
 def _env_bool(key: str, default: bool) -> bool:
     raw = _env(key).lower()
     if not raw:
@@ -161,7 +182,7 @@ def load_settings() -> Settings:
         household=household,
         household_timezone=_env("HOUSEHOLD_TIMEZONE", "Europe/Madrid"),
         default_currency=_env("DEFAULT_CURRENCY", "EUR"),
-        project_id=_env("GOOGLE_CLOUD_PROJECT"),
+        project_id=_env("GOOGLE_CLOUD_PROJECT") or detect_project_id(),
         location=_env("VERTEX_LOCATION", "us-central1"),
         bq_dataset=_env("BQ_DATASET", "nano"),
         firestore_prefix=_env("FIRESTORE_PREFIX"),

@@ -17,11 +17,12 @@ def create_app() -> FastAPI:
     """Build the app, failing fast and legibly on bad configuration."""
     try:
         settings = get_settings()
-    except ConfigError:
-        # Configure logging before re-raising so the reason is readable in
-        # Cloud Run's logs rather than a bare traceback on stderr.
+    except ConfigError as exc:
+        # Configure logging before re-raising so the reason lands as one
+        # readable CRITICAL line. A raw traceback gets split across dozens of
+        # log entries in Cloud Run and is painful to read back.
         configure_logging()
-        logger.exception("startup aborted: invalid configuration")
+        logger.critical("startup aborted, invalid configuration: %s", exc)
         raise
 
     configure_logging(project_id=settings.project_id)

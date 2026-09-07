@@ -16,7 +16,11 @@ misbehaving.
 
 from __future__ import annotations
 
+import os
+from typing import ClassVar
+
 import pytest
+from nano import config as config_module
 from nano.config import ConfigError, load_settings, parse_household
 
 from tests.fakes.whatsapp import MEMBER_PRIMARY, MEMBER_SECONDARY
@@ -129,3 +133,69 @@ class TestSignatureEnforcement:
         monkeypatch.setenv("REQUIRE_SIGNATURE", "true")
         with pytest.raises(ConfigError, match="WHATSAPP_APP_SECRET"):
             load_settings()
+
+
+class TestCloudRunEnvironment:
+    """Model the environment Cloud Run actually provides, not an assumed one.
+
+    A deploy failed at startup with `GOOGLE_CLOUD_PROJECT is required when
+    TASK_BACKEND=cloud_tasks`, because Cloud Run injects only PORT and the
+    K_* variables — never GOOGLE_CLOUD_PROJECT. An earlier smoke check passed
+    because it set that variable itself, which tested the assumption rather
+    than the platform.
+    """
+
+    CLOUD_RUN_INJECTED: ClassVar[dict[str, str]] = {
+        "PORT": "8080",
+        "K_SERVICE": "nano-webhook",
+        "K_REVISION": "nano-webhook-00010-abc",
+        "K_CONFIGURATION": "nano-webhook",
+    }
+
+    @pytest.fixture
+    def cloud_run_env(self, monkeypatch):
+        """Only what Cloud Run injects, plus what the deploy sets explicitly."""
+        for key in list(os.environ):
+            if key.startswith(("GOOGLE_", "K_", "VERTEX_", "TASK", "HOUSEHOLD_")):
+                monkeypatch.delenv(key, raising=False)
+        for key, value in self.CLOUD_RUN_INJECTED.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("VERIFY_TOKEN", "token")
+        monkeypatch.setenv("PHONE_NUMBER_ID", "000000000000000")
+        monkeypatch.setenv("HOUSEHOLD_MEMBERS", f"{MEMBER_PRIMARY}:alex")
+        monkeypatch.setenv("TASK_BACKEND", "cloud_tasks")
+        monkeypatch.setenv("TASKS_TARGET_URL", "https://example.invalid/tasks/process")
+        monkeypatch.setenv("TASKS_INVOKER_SA", "invoker@example.invalid")
+        return monkeypatch
+
+    def test_project_is_detected_when_the_platform_does_not_set_it(
+        self, cloud_run_env, monkeypatch
+    ):
+        """Cloud Run never sets GOOGLE_CLOUD_PROJECT; ADC knows it anyway."""
+        monkeypatch.setattr(config_module, "detect_project_id", lambda: "detected-project")
+        settings = load_settings()
+        assert settings.project_id == "detected-project"
+
+    def test_an_explicit_project_wins_over_detection(self, cloud_run_env, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "explicit-project")
+        monkeypatch.setattr(config_module, "detect_project_id", lambda: "detected-project")
+        assert load_settings().project_id == "explicit-project"
+
+    def test_startup_still_fails_loudly_if_the_project_cannot_be_resolved(
+        self, cloud_run_env, monkeypatch
+    ):
+        """Detection failing must be a clear error, not a mystery at first use."""
+        monkeypatch.setattr(config_module, "detect_project_id", lambda: "")
+        with pytest.raises(ConfigError, match="GOOGLE_CLOUD_PROJECT"):
+            load_settings()
+
+    def test_detection_never_raises(self, monkeypatch):
+        """A metadata-server hiccup must not crash startup."""
+
+        def explode():
+            raise RuntimeError("metadata server unreachable")
+
+        import google.auth
+
+        monkeypatch.setattr(google.auth, "default", explode)
+        assert config_module.detect_project_id() == ""

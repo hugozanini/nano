@@ -114,6 +114,7 @@ jobs:
             RECEIPTS_BUCKET=${{ secrets.RECEIPTS_BUCKET }}
             TASKS_TARGET_URL=${{ secrets.TASKS_TARGET_URL }}
             TASKS_INVOKER_SA=${{ secrets.TASKS_INVOKER_SA }}
+            GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }}
             REQUIRE_SIGNATURE=${{ vars.REQUIRE_SIGNATURE || 'false' }}
             BQ_DATASET=nano
             TASK_BACKEND=cloud_tasks
