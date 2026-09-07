@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from nano import events, gemini, history, purchases, receipts, store, whatsapp
+from nano import canonicalise, events, gemini, history, purchases, receipts, store, whatsapp
 from nano.config import Settings, get_settings
 from nano.logging_setup import bind_request, log_with, redact_number
 from nano.whatsapp import InboundMessage
@@ -90,11 +90,16 @@ def _handle_text(message: InboundMessage, settings: Settings) -> str:
         _broadcast("List cleared — happy shopping! 🛒", settings)
 
     elif intent == "query_history":
+        # The question's item name goes through the same mapping as the stored
+        # rows, or an English question can never match a Catalan receipt line.
+        raw_item = args.get("item_name")
+        item = canonicalise.canonicalise_query(raw_item) if raw_item else None
         answer = history.answer_history_query(
             args.get("query_type"),
             args.get("period", "this_month"),
-            args.get("item_name"),
+            item or raw_item,
             settings,
+            display_name=raw_item,
         )
         _reply(message.sender, answer, settings)
 
@@ -125,6 +130,13 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
     currency = receipts.normalise_currency(str(extracted.get("currency", "")), settings)
     store_name = str(extracted.get("store_name") or "unknown")
     items: list[dict[str, Any]] = list(extracted.get("items") or [])
+
+    # One batched call maps every line to an English term plus a category, so
+    # "how much on strawberries?" can reach a row printed as MADUIXA.
+    mapped = canonicalise.canonicalise_items([str(i.get("item_name", "")) for i in items])
+    for item, canon in zip(items, mapped, strict=False):
+        item["normalized_name"] = canon["canonical"]
+        item["category"] = canon["category"]
 
     purchase_id = purchases.purchase_id_for(message.id)
     receipt_uri = receipts.archive_receipt(

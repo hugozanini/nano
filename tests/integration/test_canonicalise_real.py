@@ -1,0 +1,85 @@
+"""Does the real model actually map these words?
+
+The unit tests prove the plumbing: batching, fallbacks, output alignment. They
+cannot prove the premise, because the fake returns whatever the test scripts.
+The premise is that Gemini genuinely knows `MADUIXA` is a strawberry and
+`MAQUINA VENUS START3` is not food — and that is the entire justification for
+choosing model-based canonicalisation over a hand-maintained synonym table.
+
+Real model output drifts between versions, so these assertions are deliberately
+loose: they check the mapping is *usable*, not that it produced one exact word.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.integration
+
+# Real line items from a Mercadona receipt, with what a person would ask for.
+CATALAN_ITEMS = [
+    ("MADUIXA", {"strawberry", "strawberries"}),
+    ("PASTANAGA 500 G", {"carrot", "carrots"}),
+    ("LLET SENCERA 1L", {"milk", "whole milk"}),
+    ("OUS M-12", {"egg", "eggs"}),
+    ("CINTES DE BACON", {"bacon"}),
+]
+
+FOOD_CATEGORIES = {"produce", "dairy", "meat", "seafood", "bakery", "pantry", "frozen", "snacks"}
+
+
+@pytest.fixture(scope="module")
+def real_model(project_id):
+    import vertexai
+    from vertexai.generative_models import GenerativeModel
+
+    vertexai.init(project=project_id, location="us-central1")
+    return GenerativeModel("gemini-2.5-flash")
+
+
+@pytest.fixture(scope="module")
+def mapped(real_model):
+    """One call for the whole batch, shared by every assertion below."""
+    from nano import canonicalise
+
+    names = [name for name, _ in CATALAN_ITEMS] + ["MAQUINA VENUS START3"]
+    return names, canonicalise.canonicalise_items(names, model=real_model)
+
+
+class TestRealCanonicalisation:
+    def test_every_input_gets_an_output(self, mapped):
+        names, result = mapped
+        assert len(result) == len(names)
+
+    @pytest.mark.parametrize(("item", "acceptable"), CATALAN_ITEMS)
+    def test_catalan_items_map_to_recognisable_english(self, mapped, item, acceptable):
+        names, result = mapped
+        canonical = result[names.index(item)]["canonical"]
+        assert any(word in canonical for word in acceptable), (
+            f"{item!r} became {canonical!r}, which does not contain any of {acceptable}"
+        )
+
+    def test_a_razor_is_not_categorised_as_food(self, mapped):
+        """The reason `category` exists: a receipt is not all groceries."""
+        names, result = mapped
+        entry = result[names.index("MAQUINA VENUS START3")]
+        assert entry["category"] not in FOOD_CATEGORIES, (
+            f"a razor was categorised as {entry['category']!r}"
+        )
+
+    def test_categories_come_from_the_allowed_set(self, mapped):
+        from nano.canonicalise import CATEGORIES
+
+        _, result = mapped
+        assert all(entry["category"] in CATEGORIES for entry in result)
+
+    def test_a_question_and_a_receipt_line_meet_in_the_middle(self, real_model):
+        """The end-to-end premise: English question, Catalan receipt, same term."""
+        from nano import canonicalise
+
+        stored = canonicalise.canonicalise_items(["LLET SENCERA 1L"], model=real_model)[0]
+        asked = canonicalise.canonicalise_query("milk", model=real_model)
+        assert "milk" in stored["canonical"] and "milk" in asked, (
+            f"receipt line canonicalised to {stored['canonical']!r} but the question "
+            f"canonicalised to {asked!r}; they must match for spend_by_item to work"
+        )
