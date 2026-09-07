@@ -259,6 +259,92 @@ def _items_in_last_purchase(settings: Settings) -> str:
     )
 
 
+def _explain_item(item_name: str, settings: Settings, display: str) -> str:
+    """Say what a line on a receipt actually was.
+
+    From the live chat, after Nano listed a purchase in English:
+
+        You:  What is family pack breast? Chicken breast?
+        Nano: I can't work that out yet … I've noted it as a feature request.
+
+    Every fact needed was already stored — `PIT FAM.` printed, "family pack
+    breast" translated, `meat` categorised, EUR 7.49 — and the question was
+    asked *because* Nano's own translation was unclear. Answering "I can't"
+    there is wrong twice over: it withholds data it has, and it files a
+    capability gap that does not exist, which is worse than silence because the
+    backlog is supposed to be the record of what is genuinely missing.
+
+    What it deliberately does not do is answer the question that was actually
+    asked. "Chicken breast?" cannot be confirmed: the receipt says `PIT FAM.`
+    and nothing about the animal. Saying "yes, chicken" would be the same class
+    of error as reporting euros as dollars — filling a gap in the input with
+    something plausible. So the reply gives what the receipt gives, and says
+    where that stops.
+    """
+    from google.cloud import bigquery
+
+    pattern = f"%{(item_name or '').strip().casefold()}%"
+    rows = _query(
+        f"""
+        SELECT pi.item_name, pi.item_name_en, pi.category, pi.line_total,
+               p.purchased_at, p.currency, s.store_brand,
+               COUNT(*) OVER () AS match_count
+        FROM `{settings.table("purchase_items")}` pi
+        JOIN `{settings.table("purchases")}` p USING (purchase_id)
+        LEFT JOIN `{settings.table("stores")}` s USING (store_id)
+        WHERE LOWER(pi.item_name_en) LIKE @pattern
+           OR LOWER(pi.item_name) LIKE @pattern
+           OR LOWER(pi.normalized_name) LIKE @pattern
+        ORDER BY p.purchased_at DESC
+        LIMIT 25
+        """,
+        [bigquery.ScalarQueryParameter("pattern", "STRING", pattern)],
+        settings,
+    )
+    if not rows:
+        # A lookup miss, not a missing capability. Saying so plainly keeps it
+        # out of the backlog.
+        return (
+            f'I don\'t have anything matching "{display}" in your purchases. '
+            "It may be from a receipt I haven't logged."
+        )
+
+    row = rows[0]
+    printed = (row.item_name or "").strip()
+    english = (row.item_name_en or "").strip()
+    store = (row.store_brand or "").strip()
+    when = row.purchased_at.strftime("%-d %b") if row.purchased_at else ""
+
+    where = f" on your {store} receipt" if store else " on your receipt"
+    where += f" from {when}" if when else ""
+
+    if english and english.casefold() != printed.casefold():
+        opening = f'"{english}" is how I read {printed}, printed{where}.'
+    else:
+        opening = f"{printed} appeared{where}."
+
+    facts = []
+    if row.category:
+        facts.append(f"I filed it under {str(row.category).replace('_', ' ')}")
+    if row.line_total is not None:
+        facts.append(_money(row.line_total, row.currency))
+    detail = f" {' — '.join(facts)}." if facts else ""
+
+    times = int(row.match_count or 1)
+    seen = f" You've bought it {times} times." if times > 1 else ""
+
+    # The honest stop. Only worth saying where Nano translated an abbreviation,
+    # because that is the reading the user is being asked to trust.
+    caveat = ""
+    if english and english.casefold() != printed.casefold():
+        caveat = (
+            "\n\nThat's my reading of the abbreviation on the receipt — it doesn't "
+            "record anything beyond the printed name, so I can't confirm more than that."
+        )
+
+    return f"{opening}{detail}{seen}{caveat}"
+
+
 def answer_history_query(
     query_type: str,
     period: str = "this_month",
@@ -284,11 +370,13 @@ def answer_history_query(
             return _last_purchase(item_name, settings, display)
         if query_type == "spend_by_item" and item_name:
             return _spend_by_item(item_name, settings, display)
+        if query_type == "explain_item" and item_name:
+            return _explain_item(item_name, settings, display)
     except Exception:
         logger.exception("history query failed", extra={"extra_fields": {"query": query_type}})
         return "I couldn't reach the purchase history just now — try again in a moment?"
 
-    if query_type in {"last_purchase", "spend_by_item"} and not item_name:
+    if query_type in {"last_purchase", "spend_by_item", "explain_item"} and not item_name:
         return "Which item did you mean?"
 
     return "I couldn't quite figure out how to answer that — try rephrasing?"
