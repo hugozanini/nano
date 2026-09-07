@@ -140,9 +140,9 @@ jobs:
         run: |
           set -euo pipefail
           URL="${{ steps.deploy.outputs.url }}"
-          echo "checking ${URL}/healthz"
+          echo "checking ${URL}/health"
           for attempt in 1 2 3 4 5; do
-            code=$(curl -sS -o /tmp/health.txt -w '%{http_code}' "${URL}/healthz" || echo 000)
+            code=$(curl -sS -o /tmp/health.txt -w '%{http_code}' "${URL}/health" || echo 000)
             if [ "$code" = "200" ]; then
               echo "healthy: $(cat /tmp/health.txt)"
               exit 0
