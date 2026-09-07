@@ -59,6 +59,67 @@ jobs:
         # resource names, so this needs no credentials.
         run: .venv/bin/python -m pytest tests/unit -q
 
+  routing:
+    name: Model routing (prompt changes)
+    runs-on: ubuntu-latest
+    # The narrow slice of the integration tier that must not wait for the weekly
+    # run. Prompt routing is decided by the model, so a unit test cannot check
+    # it — the fake returns whatever the test queued. Proven the hard way: the
+    # conversation-context fix passed every unit test and changed the model's
+    # answer by nothing at all, because a function description outweighed it.
+    #
+    # Cheap enough to run on a PR where the full tier is not: a few dozen small
+    # Gemini calls, no BigQuery, no Firestore, no storage.
+    if: >-
+      github.event_name != 'schedule' &&
+      github.event_name != 'workflow_dispatch'
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Did this change how anything is classified?
+        id: changed
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref || github.event.before }}" 2>/dev/null || true
+          base=$(git rev-parse FETCH_HEAD 2>/dev/null || echo "")
+          if [ -z "$base" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"   # cannot tell, so check
+            exit 0
+          fi
+          if git diff --name-only "$base"...HEAD | grep -qE '^app/nano/(gemini|handlers|analytics)\.py$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+        if: steps.changed.outputs.run == 'true'
+        with:
+          enable-cache: true
+
+      - id: auth
+        if: steps.changed.outputs.run == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_CI_TESTS_SA }}
+
+      - name: Set up Python
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -r requirements-dev.txt
+
+      - name: Routing tests
+        if: steps.changed.outputs.run == 'true'
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          # Required by the tier's credential check; these tests touch neither.
+          BQ_DATASET: nano_test
+          FIRESTORE_PREFIX: nano_test_
+        run: .venv/bin/python -m pytest tests/integration/test_classification_real.py -q
+
   integration:
     name: Integration tests (nano_test)
     runs-on: ubuntu-latest
