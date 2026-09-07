@@ -37,6 +37,10 @@ from nano.whatsapp import InboundMessage
 
 logger = logging.getLogger(__name__)
 
+# Intents whose reply goes to both phones. Their exchanges enter both people's
+# memory, because both of them watched the message arrive.
+BROADCAST_INTENTS = {"add_items", "remove_items", "close_list", "undo"}
+
 UNSUPPORTED_REPLY = "I can only read text and receipt photos for now."
 RECEIPT_FAILED_REPLY = "I couldn't read that receipt clearly — could you try a clearer photo?"
 
@@ -163,11 +167,19 @@ def _handle_text(message: InboundMessage, settings: Settings) -> str:
         text,
         turns=conversation.get("turns"),
         current_items=current,
+        last_topic=str(conversation.get("last_topic") or ""),
+        viewer=sender_name,
     )
     log_with(logger, logging.INFO, "classified message", intent=intent, sender=sender_name)
 
     reply = _apply_intent(intent, args, message, current, sender_name, settings)
-    store.record_turn(message.sender, text, intent, settings, reply)
+    topic = gemini.topic_for(intent, str(args.get("query_type") or ""))
+
+    if intent in BROADCAST_INTENTS:
+        # Both phones saw this, so both memories should carry it.
+        store.record_shared_turn(text, intent, reply, sender_name, settings, topic)
+    else:
+        store.record_turn(message.sender, text, intent, settings, reply, topic=topic)
     return intent
 
 
