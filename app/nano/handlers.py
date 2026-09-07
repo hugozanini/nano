@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from nano import (
+    analytics,
     canonicalise,
     events,
     fx,
@@ -249,6 +250,24 @@ def _apply_intent(
     if intent == "help":
         _reply(message.sender, HELP_REPLY, settings)
         return HELP_REPLY
+
+    if intent == "analytics_question":
+        question = str(args.get("question") or message.text)
+        with question_log.track(question, sender_name, settings) as entry:
+            if not settings.analytics_enabled:
+                entry.resolution = question_log.UNANSWERABLE
+                reply = _cannot_answer_reply(question)
+            else:
+                result = analytics.answer(question, settings=settings)
+                entry.resolution = question_log.GENERATED_SQL
+                entry.generated_sql = result.sql
+                entry.row_count = result.row_count
+                entry.bytes_scanned = result.bytes_scanned
+                entry.answered = result.succeeded
+                entry.failure_reason = result.failure_reason
+                reply = result.answer
+        _reply(message.sender, reply, settings)
+        return reply
 
     if intent == "cannot_answer":
         # The most direct product signal there is: someone wanted something and

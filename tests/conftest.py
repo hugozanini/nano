@@ -208,7 +208,17 @@ def nano_app(
     monkeypatch.setattr(clients, "vertex_initialised", lambda: True)
 
     # store/purchases/history import the getters by name, so patch them there too.
-    from nano import events, fx, history, purchases, question_log, receipts, store, stores
+    from nano import (
+        analytics,
+        events,
+        fx,
+        history,
+        purchases,
+        question_log,
+        receipts,
+        store,
+        stores,
+    )
 
     monkeypatch.setattr(store, "firestore_client", lambda: fake_firestore)
     monkeypatch.setattr(purchases, "bigquery_client", lambda: fake_bq)
@@ -216,6 +226,7 @@ def nano_app(
     monkeypatch.setattr(events, "bigquery_client", lambda: fake_bq)
     monkeypatch.setattr(stores, "bigquery_client", lambda: fake_bq)
     monkeypatch.setattr(question_log, "bigquery_client", lambda: fake_bq)
+    monkeypatch.setattr(analytics, "analytics_client", lambda: fake_bq)
     monkeypatch.setattr(fx, "firestore_client", lambda: fake_firestore)
     # No unit test may reach the ECB; rates come from the fake cache only.
     monkeypatch.setattr(fx, "fetch_ecb_rates", dict)
