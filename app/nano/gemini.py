@@ -321,13 +321,20 @@ INTENT_SPECS: list[dict[str, Any]] = [
                         "last_purchase",
                         "spend_by_item",
                         "items_in_last_purchase",
+                        "explain_item",
                     ],
                     "description": (
                         "total_spend: how much was spent in a time period. "
                         "last_purchase: when a specific item was last bought. "
                         "spend_by_item: total ever spent on a specific item. "
                         "items_in_last_purchase: what was bought on the most recent "
-                        "shopping trip, e.g. 'what did we buy?'."
+                        "shopping trip, e.g. 'what did we buy?'. "
+                        "explain_item: what a particular line on a receipt was, e.g. "
+                        "'what is family pack breast?' or 'what does PIT FAM mean?'. "
+                        "Use this whenever the user asks what an item IS, especially "
+                        "about something Nano has just listed — the receipt text, "
+                        "translation, category and price are all stored, so this is "
+                        "never a cannot_answer."
                     ),
                 },
                 "period": {
