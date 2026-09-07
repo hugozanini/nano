@@ -61,6 +61,7 @@ def _item_rows_parameter(purchase_id: str, items: list[dict[str, Any]]):
         bigquery.ScalarQueryParameterType("STRING", name="purchase_id"),
         bigquery.ScalarQueryParameterType("STRING", name="item_name"),
         bigquery.ScalarQueryParameterType("STRING", name="normalized_name"),
+        bigquery.ScalarQueryParameterType("STRING", name="category"),
         bigquery.ScalarQueryParameterType("NUMERIC", name="quantity"),
         bigquery.ScalarQueryParameterType("NUMERIC", name="unit_price"),
         bigquery.ScalarQueryParameterType("NUMERIC", name="line_total"),
@@ -69,12 +70,19 @@ def _item_rows_parameter(purchase_id: str, items: list[dict[str, Any]]):
     values = []
     for item in items:
         name = str(item.get("item_name", "")).strip()
+        # `normalized_name` now holds the canonical English term, so a question
+        # asked in English can match a line printed in Catalan.
         values.append(
             bigquery.StructQueryParameter(
                 None,
                 bigquery.ScalarQueryParameter("purchase_id", "STRING", purchase_id),
                 bigquery.ScalarQueryParameter("item_name", "STRING", name),
-                bigquery.ScalarQueryParameter("normalized_name", "STRING", name.lower()),
+                bigquery.ScalarQueryParameter(
+                    "normalized_name", "STRING", str(item.get("normalized_name") or name.lower())
+                ),
+                bigquery.ScalarQueryParameter(
+                    "category", "STRING", str(item.get("category") or "other")
+                ),
                 bigquery.ScalarQueryParameter(
                     "quantity", "NUMERIC", str(item.get("quantity", 1) or 1)
                 ),
@@ -149,8 +157,10 @@ def log_purchase(
         client.query(
             f"""
             INSERT INTO `{settings.table("purchase_items")}`
-            (purchase_id, item_name, normalized_name, quantity, unit_price, line_total)
-            SELECT purchase_id, item_name, normalized_name, quantity, unit_price, line_total
+            (purchase_id, item_name, normalized_name, category,
+             quantity, unit_price, line_total)
+            SELECT purchase_id, item_name, normalized_name, category,
+                   quantity, unit_price, line_total
             FROM UNNEST(@rows)
             """,
             job_config=bigquery.QueryJobConfig(

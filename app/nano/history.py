@@ -145,7 +145,7 @@ def _total_spend(period: str, settings: Settings) -> str:
     return f"You've spent {amounts} {label}, across {trips} shopping {trip_word}."
 
 
-def _last_purchase(item_name: str, settings: Settings) -> str:
+def _last_purchase(item_name: str, settings: Settings, display: str) -> str:
     from google.cloud import bigquery
 
     rows = _query(
@@ -161,15 +161,15 @@ def _last_purchase(item_name: str, settings: Settings) -> str:
         settings,
     )
     if not rows:
-        return f"I don't see any past purchases of {item_name}."
+        return f"I don't see any past purchases of {display}."
     row = rows[0]
     return (
-        f"You last bought {item_name} on {row.purchased_at.date():%-d %b} at {row.store_name} "
+        f"You last bought {display} on {row.purchased_at.date():%-d %b} at {row.store_name} "
         f"— {row.item_name}, {_money(row.line_total, row.currency)}."
     )
 
 
-def _spend_by_item(item_name: str, settings: Settings) -> str:
+def _spend_by_item(item_name: str, settings: Settings, display: str) -> str:
     from google.cloud import bigquery
 
     rows = _query(
@@ -185,12 +185,12 @@ def _spend_by_item(item_name: str, settings: Settings) -> str:
         settings,
     )
     if not rows:
-        return f"I haven't seen {item_name} on any receipt yet."
+        return f"I haven't seen {display} on any receipt yet."
 
     times = sum(row.times for row in rows)
     amounts = ", ".join(_money(row.total, row.currency) for row in rows)
     time_word = "time" if times == 1 else "times"
-    return f"You've spent {amounts} on {item_name}, across {times} {time_word}."
+    return f"You've spent {amounts} on {display}, across {times} {time_word}."
 
 
 def _items_in_last_purchase(settings: Settings) -> str:
@@ -236,8 +236,16 @@ def answer_history_query(
     period: str = "this_month",
     item_name: str | None = None,
     settings: Settings | None = None,
+    display_name: str | None = None,
 ) -> str:
+    """Answer one history question.
+
+    `item_name` is the canonical term used for matching; `display_name` is the
+    word the user actually typed, so the reply reads back in their language
+    rather than echoing an internal canonical form.
+    """
     settings = settings or get_settings()
+    display = display_name or item_name or ""
 
     try:
         if query_type == "total_spend":
@@ -245,9 +253,9 @@ def answer_history_query(
         if query_type == "items_in_last_purchase":
             return _items_in_last_purchase(settings)
         if query_type == "last_purchase" and item_name:
-            return _last_purchase(item_name, settings)
+            return _last_purchase(item_name, settings, display)
         if query_type == "spend_by_item" and item_name:
-            return _spend_by_item(item_name, settings)
+            return _spend_by_item(item_name, settings, display)
     except Exception:
         logger.exception("history query failed", extra={"extra_fields": {"query": query_type}})
         return "I couldn't reach the purchase history just now — try again in a moment?"
