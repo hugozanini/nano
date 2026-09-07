@@ -203,7 +203,7 @@ class TestTotalSpend:
         """
         wired_history.when("GROUP BY currency", [])
         wired_history.when(
-            "ORDER BY purchased_at DESC",
+            "ORDER BY p.purchased_at DESC",
             [
                 {
                     "purchase_id": "p-1",
@@ -223,7 +223,7 @@ class TestTotalSpend:
 
     def test_no_purchases_at_all_says_so_helpfully(self, wired_history, settings):
         wired_history.when("GROUP BY currency", [])
-        wired_history.when("ORDER BY purchased_at DESC", [])
+        wired_history.when("ORDER BY p.purchased_at DESC", [])
         answer = history.answer_history_query("total_spend", "this_month", None, settings)
         assert "haven't logged any receipts yet" in answer
 
@@ -259,10 +259,38 @@ class TestTotalSpend:
 
 
 class TestItemsInLastPurchase:
+    def test_prices_are_not_nested_inside_the_name_brackets(self, wired_history, settings):
+        """ "eggs (24 OUS FRESC) (EUR 10.50)" reads badly on a phone."""
+        wired_history.when(
+            "ORDER BY p.purchased_at DESC",
+            [
+                {
+                    "purchase_id": "p1",
+                    "purchased_at": datetime.datetime(2026, 8, 29),
+                    "store_name": "Supermercat Exemple",
+                    "total_amount": Decimal("1.15"),
+                    "currency": "EUR",
+                }
+            ],
+        )
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [
+                {
+                    "item_name": "LLET SENCERA 1L",
+                    "item_name_en": "whole milk, 1L",
+                    "line_total": Decimal("1.15"),
+                }
+            ],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "(LLET SENCERA 1L) (EUR" not in answer
+        assert "(LLET SENCERA 1L) \u2014 EUR 1.15" in answer
+
     def test_lists_the_items_from_the_most_recent_trip(self, wired_history, settings):
         """ "What did we buy?" had no intent and fell through to the shopping list."""
         wired_history.when(
-            "ORDER BY purchased_at DESC",
+            "ORDER BY p.purchased_at DESC",
             [
                 {
                     "purchase_id": "p-1",
@@ -286,7 +314,7 @@ class TestItemsInLastPurchase:
         assert "2 items" in answer
 
     def test_no_receipts_yet(self, wired_history, settings):
-        wired_history.when("ORDER BY purchased_at DESC", [])
+        wired_history.when("ORDER BY p.purchased_at DESC", [])
         answer = history.answer_history_query("items_in_last_purchase", settings=settings)
         assert "haven't logged any receipts yet" in answer
 
@@ -351,7 +379,7 @@ class TestItemsAreScopedToOnePurchase:
 
     def test_only_the_latest_purchase_is_listed(self, wired_history, settings):
         wired_history.when(
-            "ORDER BY purchased_at DESC",
+            "ORDER BY p.purchased_at DESC",
             [
                 {
                     "purchase_id": "newest",
@@ -375,7 +403,7 @@ class TestItemsAreScopedToOnePurchase:
     def test_the_item_query_does_not_filter_by_date(self, wired_history, settings):
         """Filtering by date is what let a second purchase bleed in."""
         wired_history.when(
-            "ORDER BY purchased_at DESC",
+            "ORDER BY p.purchased_at DESC",
             [
                 {
                     "purchase_id": "newest",
@@ -392,3 +420,71 @@ class TestItemsAreScopedToOnePurchase:
         sql = wired_history.statements_matching("ORDER BY line_total DESC")[-1].sql
         assert "purchase_id = @purchase_id" in " ".join(sql.split())
         assert "DATE(p.purchased_at)" not in sql
+
+
+class TestItemNamesAreShownInEnglish:
+    """A list of MADUIXA, PIT FAM. and GREC NATURAL P-6 is unreadable.
+
+    Asked "what have I purchased last time?", Nano listed twelve Catalan
+    abbreviations — the English translations had been stored since the
+    translation work but were never read back.
+    """
+
+    def _latest(self):
+        return [
+            {
+                "purchase_id": "p1",
+                "purchased_at": datetime.datetime(2026, 8, 29),
+                "store_name": "Supermercat Exemple",
+                "total_amount": Decimal("21.70"),
+                "currency": "EUR",
+            }
+        ]
+
+    def test_english_leads_with_the_printed_name_beside_it(self, wired_history, settings):
+        wired_history.when("ORDER BY p.purchased_at DESC", self._latest())
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [
+                {
+                    "item_name": "LLET SENCERA 1L",
+                    "item_name_en": "whole milk, 1L",
+                    "line_total": Decimal("1.15"),
+                }
+            ],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "whole milk, 1L (LLET SENCERA 1L)" in answer
+
+    def test_the_printed_name_is_used_when_there_is_no_translation(self, wired_history, settings):
+        """Older rows predate the translation column; they must still render."""
+        wired_history.when("ORDER BY p.purchased_at DESC", self._latest())
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [{"item_name": "MADUIXA", "item_name_en": None, "line_total": Decimal("3.11")}],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "MADUIXA" in answer
+        assert "()" not in answer, "an empty bracket is worse than no bracket"
+
+    def test_an_identical_translation_is_not_repeated(self, wired_history, settings):
+        """ "BANANA" translates to "banana"; printing both is noise."""
+        wired_history.when("ORDER BY p.purchased_at DESC", self._latest())
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [{"item_name": "BANANA", "item_name_en": "banana", "line_total": Decimal("1.36")}],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "banana (BANANA)" not in answer
+
+    def test_the_normalised_brand_is_preferred_over_the_legal_name(self, wired_history, settings):
+        """ "Mercadona" reads better than "MERCADONA, S.A."."""
+        sql = " ".join(
+            history.most_recent_purchase.__doc__ or "",
+        )
+        wired_history.when("ORDER BY p.purchased_at DESC", self._latest())
+        wired_history.when("ORDER BY line_total DESC", [])
+        history.answer_history_query("items_in_last_purchase", settings=settings)
+
+        query = wired_history.statements_matching("ORDER BY p.purchased_at DESC")[-1].sql
+        assert "store_brand" in query, f"should join the store dimension {sql}"

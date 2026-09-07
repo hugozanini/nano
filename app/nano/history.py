@@ -88,9 +88,11 @@ def most_recent_purchase(settings: Settings) -> dict | None:
     """The latest trip, used to give an empty result something to say."""
     rows = _query(
         f"""
-        SELECT purchase_id, purchased_at, store_name, total_amount, currency
-        FROM `{settings.table("purchases")}`
-        ORDER BY purchased_at DESC, created_at DESC
+        SELECT p.purchase_id, p.purchased_at, p.total_amount, p.currency,
+               COALESCE(NULLIF(s.store_brand, ''), p.store_name) AS store_name
+        FROM `{settings.table("purchases")}` p
+        LEFT JOIN `{settings.table("stores")}` s USING (store_id)
+        ORDER BY p.purchased_at DESC, p.created_at DESC
         LIMIT 1
         """,
         [],
@@ -194,6 +196,27 @@ def _spend_by_item(item_name: str, settings: Settings, display: str) -> str:
     return f"You've spent {amounts} on {display}, across {times} {time_word}."
 
 
+def _item_label(row) -> str:
+    """Show the English name, with what the receipt printed beside it.
+
+    A list of `MADUIXA`, `PIT FAM.` and `GREC NATURAL P-6` is unreadable to
+    anyone who does not shop in Catalan, which was the complaint. English leads.
+
+    The printed name is kept in brackets rather than dropped, because it is what
+    is actually on the paper receipt and the till display — useful when checking
+    a total or looking for the line again. It is omitted when the translation
+    adds nothing.
+    """
+    printed = (getattr(row, "item_name", "") or "").strip()
+    english = (getattr(row, "item_name_en", "") or "").strip()
+
+    if not english:
+        return printed
+    if english.casefold() == printed.casefold():
+        return english
+    return f"{english} ({printed})"
+
+
 def _items_in_last_purchase(settings: Settings) -> str:
     """ "What did we buy?" — the obvious follow-up after logging a receipt.
 
@@ -208,7 +231,7 @@ def _items_in_last_purchase(settings: Settings) -> str:
 
     rows = _query(
         f"""
-        SELECT item_name, line_total
+        SELECT item_name, item_name_en, line_total
         FROM `{settings.table("purchase_items")}`
         WHERE purchase_id = @purchase_id
         ORDER BY line_total DESC
@@ -222,8 +245,10 @@ def _items_in_last_purchase(settings: Settings) -> str:
             f"({_money(latest['total'], latest['currency'])}), but I don't have the line items."
         )
 
+    # The price is separated rather than bracketed: the printed name is already
+    # in brackets, and nesting them reads badly on a phone.
     lines = "\n".join(
-        f"- {row.item_name} ({_money(row.line_total, latest['currency'])})" for row in rows
+        f"- {_item_label(row)} \u2014 {_money(row.line_total, latest['currency'])}" for row in rows
     )
     return (
         f"Your last trip was {latest['date']:%-d %b} at {latest['store']}, "
