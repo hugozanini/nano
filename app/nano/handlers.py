@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 
 # Intents whose reply goes to both phones. Their exchanges enter both people's
 # memory, because both of them watched the message arrive.
+# Phrases that pick a reading, beyond the reading's own name. Kept literal and
+# small: a wrong match here answers the wrong question silently, whereas no
+# match just re-classifies the message, which is the safe direction to fail.
+_OPTION_WORDS = {
+    "shopping_list": ("shopping list", "shopping", "to buy", "to-buy", "the list"),
+    "last_purchase": ("last purchase", "bought", "purchase", "receipt", "last time"),
+    "spending": ("spending", "spent", "how much", "cost", "total"),
+}
+
 BROADCAST_INTENTS = {"add_items", "remove_items", "close_list", "undo"}
 
 UNSUPPORTED_REPLY = "I can only read text and receipt photos for now."
@@ -196,20 +205,110 @@ def _resolve_pending(
     classified normally — someone may simply have changed the subject.
     """
     answer = text.lower().strip(" .!?")
+    kind = str(pending.get("kind") or "")
+    payload = pending.get("payload") or {}
 
-    if answer in AFFIRMATIVE and pending.get("action") == "close_list":
-        previous = list(pending.get("items") or [])
+    if kind == "clarify":
+        return _resolve_clarification(message, answer, payload, sender_name, settings)
+
+    if answer in AFFIRMATIVE and kind == "close_list":
+        previous = list(payload.get("items") or [])
         store.close_list(settings)
         store.record_action(message.sender, "close_list", [], previous, settings)
         events.record(events.CLOSE_LIST, previous, sender_name, settings, message.id)
         _broadcast("List cleared — happy shopping! \U0001f6d2", settings)
         return "close_list"
 
-    if answer in NEGATIVE:
+    if answer in NEGATIVE and kind == "close_list":
         _reply(message.sender, "Left the list as it is.", settings)
         return "cancelled"
 
     return None
+
+
+def _resolve_clarification(
+    message: InboundMessage,
+    answer: str,
+    payload: dict[str, Any],
+    sender_name: str,
+    settings: Settings,
+) -> str | None:
+    """Turn an answer to "did you mean A or B?" into the intent it chose.
+
+    Returns None when the message is not an answer at all, so it gets classified
+    fresh. Insisting on an answer to a question someone has moved on from is its
+    own kind of broken, and the clarification has already been cleared.
+    """
+    options = [str(o) for o in (payload.get("options") or []) if str(o) in gemini.READINGS]
+    if not options:
+        return None
+
+    chosen = _match_option(answer, options)
+    if not chosen:
+        return None
+
+    reading = gemini.READINGS[chosen]
+    args: dict[str, Any] = {}
+    if reading["query_type"]:
+        args["query_type"] = reading["query_type"]
+
+    current = store.get_items(settings)
+    reply = _apply_intent(reading["intent"], args, message, current, sender_name, settings)
+
+    question_log.record(
+        question_log.QuestionRecord(
+            question=message.text,
+            asked_by=sender_name,
+            resolution=question_log.CLARIFIED,
+            template_name=chosen,
+            answered=True,
+        ),
+        settings,
+    )
+    # The choice becomes the subject, so a follow-up like "and in English?"
+    # stays on it without asking again.
+    store.record_turn(
+        message.sender,
+        message.text,
+        reading["intent"],
+        settings,
+        reply,
+        topic=gemini.topic_for(reading["intent"], reading["query_type"]),
+    )
+    return reading["intent"]
+
+
+def _match_option(answer: str, options: list[str]) -> str:
+    """Match an answer to one of the offered readings, or "" if it matches none.
+
+    Deterministic on purpose: this runs on every reply while a clarification is
+    open, and a model call to interpret the word "first" would be slower, more
+    expensive and less predictable than a lookup.
+    """
+    ordinals = {
+        "1": 0,
+        "one": 0,
+        "first": 0,
+        "the first": 0,
+        "a": 0,
+        "2": 1,
+        "two": 1,
+        "second": 1,
+        "the second": 1,
+        "b": 1,
+    }
+    if answer in ordinals and ordinals[answer] < len(options):
+        return options[ordinals[answer]]
+
+    # Longest first, so "shopping list" is not shadowed by a shorter "list".
+    scored = sorted(
+        ((o, w) for o in options for w in _OPTION_WORDS.get(o, ())),
+        key=lambda pair: -len(pair[1]),
+    )
+    for option, word in scored:
+        if word in answer:
+            return option
+    return ""
 
 
 def _apply_intent(
@@ -239,6 +338,27 @@ def _apply_intent(
         _broadcast(reply, settings)
         return reply
 
+    if intent == "clarify":
+        options = _clarify_options(args.get("options"))
+        if not options:
+            # The model asked to clarify without saying between what. Answering
+            # the likelier reading beats asking an empty question.
+            return _apply_intent("get_list", {}, message, current, sender_name, settings)
+        store.set_pending(message.sender, "clarify", {"options": options}, settings)
+        reply = _clarify_question(options)
+        _reply(message.sender, reply, settings)
+        question_log.record(
+            question_log.QuestionRecord(
+                question=message.text,
+                asked_by=sender_name,
+                resolution=question_log.CLARIFIED,
+                answered=False,
+                failure_reason=f"asked between {' and '.join(options)}",
+            ),
+            settings,
+        )
+        return reply
+
     if intent == "close_list":
         # Destructive and easy to say by accident, so confirm when there is
         # something to lose.
@@ -246,7 +366,7 @@ def _apply_intent(
             reply = "The list is already empty \U0001f389"
             _reply(message.sender, reply, settings)
             return reply
-        store.set_pending(message.sender, "close_list", current, settings)
+        store.set_pending(message.sender, "close_list", {"items": current}, settings)
         reply = (
             f"That'll clear all {len(current)} items "
             f"({', '.join(current[:3])}{'…' if len(current) > 3 else ''}). "
@@ -330,12 +450,49 @@ def _apply_intent(
             entry.resolution = question_log.TEMPLATE
             entry.template_name = str(args.get("query_type") or "unknown")
             entry.answered = True
+        reply = _assumption_note(str(args.get("assumed") or ""), reply)
         _reply(message.sender, reply, settings)
         return reply
 
-    reply = format_list(current)
+    reply = _assumption_note(str(args.get("assumed") or ""), format_list(current))
     _reply(message.sender, reply, settings)
     return reply
+
+
+def _clarify_options(raw: Any) -> list[str]:
+    """The two readings to ask between, or nothing if they do not make a question.
+
+    One option is not a question and three is an interrogation, so anything that
+    is not exactly two distinct known readings is refused and answered instead.
+    """
+    seen = [str(o) for o in (raw or []) if str(o) in gemini.READINGS]
+    unique = list(dict.fromkeys(seen))
+    return unique[:2] if len(unique) >= 2 else []
+
+
+def _clarify_question(options: list[str]) -> str:
+    labels = [gemini.READINGS[o]["label"] for o in options]
+    picks = [gemini.READINGS[o]["pick"] for o in options]
+    return f'Do you mean {labels[0]}, or {labels[1]}? Reply "{picks[0]}" or "{picks[1]}".'
+
+
+def _assumption_note(assumed: str, reply: str) -> str:
+    """Name the reading that was taken, and offer the other one.
+
+    Only ever appended, never substituted for an answer: the user gets what they
+    most likely asked for either way, and one line to correct it if not.
+    """
+    reading = gemini.READINGS.get(str(assumed or ""))
+    if not reading:
+        return reply
+    others = [r for k, r in gemini.READINGS.items() if k != assumed]
+    alternative = next(
+        (r for r in others if r["intent"] != reading["intent"]),
+        others[0] if others else None,
+    )
+    if not alternative:
+        return reply
+    return f'{reply}\n\n(Showing {reading["label"]} — say "{alternative["pick"]}" if you meant that instead.)'
 
 
 def _describe(request: str) -> str:
