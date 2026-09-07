@@ -66,7 +66,12 @@ class RecordedCall:
 
 
 class FakeGeminiModel:
-    """Returns queued responses in order; the last one repeats once exhausted."""
+    """Returns queued responses in strict FIFO order.
+
+    Once the queue is empty the configured default is used, or an unscripted
+    call raises. Responses are never replayed: a test that queues a response
+    between calls gets exactly the one it queued.
+    """
 
     def __init__(self, model_name: str = "fake-flash"):
         self.model_name = model_name
@@ -118,14 +123,18 @@ class FakeGeminiModel:
 
         if self._error is not None:
             raise self._error
-        if not self._queue:
-            if self._default is not None:
-                return self._default
-            raise AssertionError(
-                f"FakeGeminiModel got an unscripted call ({len(self.calls)} so far). "
-                "Queue a response with queue_function_call/queue_json/queue_text."
-            )
-        return self._queue.pop(0) if len(self._queue) > 1 else self._queue[0]
+        # Strict FIFO. An earlier version returned the last queued response
+        # forever once only one remained, which silently replayed a stale
+        # response whenever a test queued incrementally between calls.
+        if self._queue:
+            return self._queue.pop(0)
+        if self._default is not None:
+            return self._default
+        raise AssertionError(
+            f"FakeGeminiModel got an unscripted call ({len(self.calls)} so far). "
+            "Queue a response with queue_function_call/queue_json/queue_text, "
+            "or set a default with set_default_function_call."
+        )
 
     # --- assertion helpers --------------------------------------------------
 
