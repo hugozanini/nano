@@ -17,9 +17,16 @@ on:
   schedule:
     - cron: '0 6 * * 1'
 
+# Cancelling superseded runs is only right on a pull request, where nobody
+# cares about the result for an intermediate commit. On the default branch each
+# run is a historical record of whether that commit was good, and a cancelled
+# run is indistinguishable from a failed one at a glance — it makes main look
+# broken when it is not. The event is part of the group as well, so a manual
+# dispatch and a push never contend: they are different intents, and one killing
+# the other is never what was wanted.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
