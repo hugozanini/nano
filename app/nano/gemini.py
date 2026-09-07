@@ -213,6 +213,33 @@ INTENT_SPECS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {}},
     },
     {
+        "name": "about_nano",
+        "description": (
+            "Answer a question about Nano itself — what model it uses, how it works, "
+            "what it stores, or who built it. Nano knows these, so they are never "
+            "cannot_answer and never a feature request.\n"
+            "This is about the assistant, not about groceries. 'what can you do' is "
+            "`help`; 'what is family pack breast' is query_history/explain_item."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "enum": ["which_model", "how_it_works", "data_privacy", "who_built_it"],
+                    "description": (
+                        "which_model: which AI model or technology Nano runs on. "
+                        "how_it_works: how Nano works end to end. "
+                        "data_privacy: what Nano stores or keeps, who can see it, "
+                        "whether it trains on the conversation. "
+                        "who_built_it: who made Nano and what it is for."
+                    ),
+                },
+            },
+            "required": ["topic"],
+        },
+    },
+    {
         "name": "help",
         "description": (
             "List what this assistant can do. ONLY for an explicit request for help, "
