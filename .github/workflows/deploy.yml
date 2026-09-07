@@ -123,9 +123,17 @@ jobs:
             VERTEX_LOCATION=us-central1
             DEFAULT_CURRENCY=EUR
             LOG_LEVEL=INFO
+          # Authoritative rather than merged. The default "merge" left the
+          # shredded HOUSEHOLD_NUMBERS from the old pipeline on the service,
+          # along with two junk variables named after phone numbers, long after
+          # the value was fixed. Declaring the environment means what is in this
+          # file is exactly what runs. Both strategies are independent, and the
+          # secrets block below lists every mount, so neither drops anything.
+          env_vars_update_strategy: overwrite
           secrets: |
             WHATSAPP_ACCESS_TOKEN=whatsapp-access-token:latest
             WHATSAPP_APP_SECRET=whatsapp-app-secret:latest
+          secrets_update_strategy: overwrite
           # --clear-base-image drops the automatic base image that buildpacks
           # attached on earlier deploys. Cloud Run refuses a Dockerfile build
           # while one is still associated with the service.

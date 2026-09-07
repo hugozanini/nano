@@ -2,8 +2,8 @@
 
 This runs off the request path, inside a Cloud Tasks callback or a background
 task, so it is allowed to be slow. Everything here is deliberately synchronous:
-FastAPI runs sync endpoint functions in a worker thread, so blocking calls here
-never touch the event loop.
+FastAPI runs sync endpoint functions in a worker thread, so blocking calls never
+touch the event loop.
 
 Reply routing follows the shape of the action. A change to shared state goes to
 everyone, because that is the point of a shared list. A question is answered to
@@ -15,9 +15,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from nano import gemini, history, purchases, store, whatsapp
+from nano import events, gemini, history, purchases, receipts, store, whatsapp
 from nano.config import Settings, get_settings
-from nano.logging_setup import log_with, redact_number
+from nano.logging_setup import bind_request, log_with, redact_number
 from nano.whatsapp import InboundMessage
 
 logger = logging.getLogger(__name__)
@@ -68,18 +68,25 @@ def handle_message(message: InboundMessage, settings: Settings | None = None) ->
 
 def _handle_text(message: InboundMessage, settings: Settings) -> str:
     intent, args = gemini.classify_message(message.text)
-    log_with(logger, logging.INFO, "classified message", intent=intent)
+    sender_name = settings.name_for(message.sender)
+    log_with(logger, logging.INFO, "classified message", intent=intent, sender=sender_name)
 
     if intent == "add_items":
-        items = store.add_items(list(args.get("items") or []), settings)
+        requested = [str(i) for i in (args.get("items") or [])]
+        items = store.add_items(requested, settings)
+        events.record(events.ADD_ITEM, requested, sender_name, settings, message.id)
         _broadcast(f"Added! {format_list(items)}", settings)
 
     elif intent == "remove_items":
-        items = store.remove_items(list(args.get("items") or []), settings)
+        requested = [str(i) for i in (args.get("items") or [])]
+        items = store.remove_items(requested, settings)
+        events.record(events.REMOVE_ITEM, requested, sender_name, settings, message.id)
         _broadcast(f"Removed. {format_list(items)}", settings)
 
     elif intent == "close_list":
+        cleared = store.get_items(settings)
         store.close_list(settings)
+        events.record(events.CLOSE_LIST, cleared, sender_name, settings, message.id)
         _broadcast("List cleared — happy shopping! 🛒", settings)
 
     elif intent == "query_history":
@@ -98,23 +105,41 @@ def _handle_text(message: InboundMessage, settings: Settings) -> str:
 
 
 def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
+    sender_name = settings.name_for(message.sender)
+
     try:
         image_bytes, mime_type = whatsapp.download_media(message.media_id, settings)
-        receipt = gemini.extract_receipt(image_bytes, mime_type)
+        extracted = gemini.extract_receipt(image_bytes, mime_type)
     except Exception as exc:
         log_with(logger, logging.ERROR, "receipt extraction failed", error=str(exc))
         _reply(message.sender, RECEIPT_FAILED_REPLY, settings)
         return
 
+    purchased_on, note = receipts.sanitise_purchase_date(
+        str(extracted.get("purchase_date", "")),
+        today=history.today_in_household_tz(settings),
+    )
+    if note:
+        log_with(logger, logging.WARNING, "adjusted the receipt date", detail=note)
+
+    currency = receipts.normalise_currency(str(extracted.get("currency", "")), settings)
+    store_name = str(extracted.get("store_name") or "unknown")
+    items: list[dict[str, Any]] = list(extracted.get("items") or [])
+
+    purchase_id = purchases.purchase_id_for(message.id)
+    receipt_uri = receipts.archive_receipt(
+        image_bytes, mime_type, purchase_id, purchased_on, settings
+    )
+
     try:
-        items: list[dict[str, Any]] = list(receipt.get("items") or [])
         purchase_id, written = purchases.log_purchase(
             message_id=message.id,
-            store_name=receipt.get("store_name", "unknown"),
-            purchase_date=receipt.get("purchase_date", ""),
-            currency=receipt.get("currency", settings.default_currency),
-            total_amount=receipt.get("total_amount", 0),
+            store_name=store_name,
+            purchase_date=purchased_on.isoformat(),
+            currency=currency,
+            total_amount=extracted.get("total_amount", 0),
             items=items,
+            receipt_uri=receipt_uri,
             settings=settings,
         )
     except Exception as exc:
@@ -133,13 +158,14 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
         )
         return
 
-    remaining = store.clear_matched_items(
-        [str(item.get("item_name", "")) for item in items], settings
-    )
+    item_names = [str(item.get("item_name", "")) for item in items]
+    remaining = store.clear_matched_items(item_names, settings)
+    events.record(events.PURCHASE_CLEARED, item_names, sender_name, settings, message.id)
+
+    total = extracted.get("total_amount", 0)
     _broadcast(
-        f"Logged your receipt from {receipt.get('store_name', 'the shop')} "
-        f"({receipt.get('currency', settings.default_currency)} "
-        f"{receipt.get('total_amount', 0)}). {format_list(remaining)}",
+        f"Logged your receipt from {store_name} ({currency} {total}) "
+        f"on {purchased_on:%-d %b}. {format_list(remaining)}",
         settings,
     )
 
@@ -151,8 +177,6 @@ def process_payload(payload: dict[str, Any], settings: Settings | None = None) -
     own name-based dedupe and this one are independent layers, and so that a
     task retried by Cloud Tasks after a genuine failure is still deduped.
     """
-    from nano.logging_setup import bind_request
-
     settings = settings or get_settings()
     message = whatsapp.parse_inbound(payload)
     if message is None:

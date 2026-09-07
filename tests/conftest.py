@@ -24,6 +24,7 @@ import pytest
 from tests.fakes.bigquery import FakeBigQueryClient
 from tests.fakes.firestore import FakeFirestoreClient
 from tests.fakes.gemini import FakeGeminiModel
+from tests.fakes.storage import FakeStorageClient
 from tests.fakes.whatsapp import (
     MEMBER_PRIMARY,
     MEMBER_SECONDARY,
@@ -159,6 +160,11 @@ def fake_whatsapp() -> FakeWhatsAppClient:
 
 
 @pytest.fixture
+def fake_storage() -> FakeStorageClient:
+    return FakeStorageClient()
+
+
+@pytest.fixture
 def app_secret() -> str:
     return APP_SECRET
 
@@ -181,6 +187,7 @@ def nano_app(
     fake_bq: FakeBigQueryClient,
     fake_gemini: FakeGeminiModel,
     fake_whatsapp: FakeWhatsAppClient,
+    fake_storage: FakeStorageClient,
 ):
     """A real FastAPI app with every outbound dependency replaced.
 
@@ -201,11 +208,13 @@ def nano_app(
     monkeypatch.setattr(clients, "vertex_initialised", lambda: True)
 
     # store/purchases/history import the getters by name, so patch them there too.
-    from nano import history, purchases, store
+    from nano import events, history, purchases, receipts, store
 
     monkeypatch.setattr(store, "firestore_client", lambda: fake_firestore)
     monkeypatch.setattr(purchases, "bigquery_client", lambda: fake_bq)
     monkeypatch.setattr(history, "bigquery_client", lambda: fake_bq)
+    monkeypatch.setattr(events, "bigquery_client", lambda: fake_bq)
+    monkeypatch.setattr(receipts, "storage_client", lambda: fake_storage)
 
     monkeypatch.setattr(gemini, "classifier_model", lambda: fake_gemini)
     monkeypatch.setattr(gemini, "extraction_model", lambda: fake_gemini)

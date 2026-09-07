@@ -1,0 +1,339 @@
+"""Receipt handling, list events, and history answers.
+
+Each class here corresponds to something that was observed to be wrong in
+production rather than something imagined.
+"""
+
+from __future__ import annotations
+
+import datetime
+from decimal import Decimal
+
+import pytest
+from nano import events, history, receipts
+from nano.config import load_settings
+
+from tests.fakes.bigquery import FakeBigQueryClient
+from tests.fakes.storage import FakeStorageClient
+
+
+@pytest.fixture
+def settings():
+    return load_settings()
+
+
+@pytest.fixture
+def wired_history(monkeypatch, fake_bq: FakeBigQueryClient):
+    monkeypatch.setattr(history, "bigquery_client", lambda: fake_bq)
+    return fake_bq
+
+
+@pytest.fixture
+def wired_events(monkeypatch, fake_bq: FakeBigQueryClient):
+    monkeypatch.setattr(events, "bigquery_client", lambda: fake_bq)
+    return fake_bq
+
+
+@pytest.fixture
+def wired_storage(monkeypatch, fake_storage: FakeStorageClient):
+    monkeypatch.setattr(receipts, "storage_client", lambda: fake_storage)
+    return fake_storage
+
+
+# --------------------------------------------------------------------------
+# Receipt dates
+# --------------------------------------------------------------------------
+
+
+class TestSanitisePurchaseDate:
+    TODAY = datetime.date(2026, 9, 7)
+
+    def test_a_plausible_date_is_taken_as_is(self):
+        date, note = receipts.sanitise_purchase_date("2026-08-29", today=self.TODAY)
+        assert date == datetime.date(2026, 8, 29)
+        assert note == ""
+
+    def test_an_unambiguous_date_is_never_swapped(self):
+        """29 August has no valid swap — there is no month 29.
+
+        This matters: the real receipt in production was 2026-08-29 and was read
+        correctly. A date-repair rule that damaged it would be worse than none.
+        """
+        date, note = receipts.sanitise_purchase_date("2026-08-29", today=self.TODAY)
+        assert date == datetime.date(2026, 8, 29)
+        assert note == ""
+
+    def test_a_future_date_with_a_valid_swap_is_reinterpreted(self):
+        """2026-12-03 read on 7 Sept is really 3 December -> 12 March."""
+        date, note = receipts.sanitise_purchase_date("2026-12-03", today=self.TODAY)
+        assert date == datetime.date(2026, 3, 12)
+        assert "future" in note
+
+    def test_a_future_date_without_a_valid_swap_falls_back_to_today(self):
+        date, note = receipts.sanitise_purchase_date("2027-01-15", today=self.TODAY)
+        assert date == self.TODAY
+        assert "future" in note
+
+    def test_a_very_old_date_with_a_valid_swap_is_reinterpreted(self):
+        date, note = receipts.sanitise_purchase_date("2026-01-09", today=self.TODAY)
+        assert date == datetime.date(2026, 9, 1)
+        assert "too old" in note
+
+    def test_a_genuinely_old_receipt_is_kept(self):
+        """Old but unambiguous: no month 25, so it cannot be a swap."""
+        date, note = receipts.sanitise_purchase_date("2025-03-25", today=self.TODAY)
+        assert date == datetime.date(2025, 3, 25)
+        assert note == ""
+
+    @pytest.mark.parametrize("raw", ["", "not a date", "29/08/2026", None])
+    def test_unparseable_values_fall_back_to_today(self, raw):
+        date, note = receipts.sanitise_purchase_date(raw or "", today=self.TODAY)
+        assert date == self.TODAY
+        assert note
+
+    def test_an_impossible_date_falls_back(self):
+        date, _ = receipts.sanitise_purchase_date("2026-02-31", today=self.TODAY)
+        assert date == self.TODAY
+
+
+class TestNormaliseCurrency:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("EUR", "EUR"), ("eur", "EUR"), ("  brl ", "BRL"), ("€", "EUR"), ("$", "USD")],
+    )
+    def test_recognised_values(self, raw, expected, settings):
+        assert receipts.normalise_currency(raw, settings) == expected
+
+    @pytest.mark.parametrize("raw", ["", "euros", "?", "XYZQ"])
+    def test_unrecognised_values_use_the_household_default(self, raw, settings):
+        assert receipts.normalise_currency(raw, settings) == "EUR"
+
+
+# --------------------------------------------------------------------------
+# Receipt archival
+# --------------------------------------------------------------------------
+
+
+class TestArchiveReceipt:
+    def test_uploads_and_returns_a_gs_uri(self, wired_storage, settings):
+        uri = receipts.archive_receipt(
+            b"jpegbytes", "image/jpeg", "abc-123", datetime.date(2026, 8, 29), settings
+        )
+        assert uri == "gs://test-receipts-bucket/receipts/2026/08/abc-123.jpg"
+        assert wired_storage.uploads[0].content == b"jpegbytes"
+        assert wired_storage.uploads[0].content_type == "image/jpeg"
+
+    def test_path_is_browsable_by_year_and_month(self, wired_storage, settings):
+        receipts.archive_receipt(b"x", "image/png", "id", datetime.date(2026, 1, 5), settings)
+        assert wired_storage.paths == ["receipts/2026/01/id.png"]
+
+    def test_a_storage_failure_returns_empty_rather_than_raising(self, wired_storage, settings):
+        """Losing the image must never lose the purchase, which has the money in it."""
+        wired_storage.fails(RuntimeError("bucket on fire"))
+        assert (
+            receipts.archive_receipt(b"x", "image/jpeg", "id", datetime.date(2026, 8, 29), settings)
+            == ""
+        )
+
+    def test_no_bucket_configured_is_handled(self, monkeypatch, wired_storage):
+        monkeypatch.setenv("RECEIPTS_BUCKET", "")
+        assert (
+            receipts.archive_receipt(
+                b"x", "image/jpeg", "id", datetime.date(2026, 8, 29), load_settings()
+            )
+            == ""
+        )
+
+
+# --------------------------------------------------------------------------
+# list_events
+# --------------------------------------------------------------------------
+
+
+class TestListEvents:
+    def test_one_row_per_item_in_a_single_statement(self, wired_events, settings):
+        written = events.record(events.ADD_ITEM, ["coffee", "milk"], "alex", settings, "wamid.A")
+        assert written == 2
+        assert wired_events.count_matching("INSERT INTO `nano_test.list_events`") == 1
+
+    def test_rows_carry_the_sender(self, wired_events, settings):
+        events.record(events.ADD_ITEM, ["coffee"], "alex", settings, "wamid.A")
+        rows = wired_events.queries[-1].param("rows")
+        assert rows[0]["sender"] == "alex"
+        assert rows[0]["event_type"] == "add_item"
+        assert rows[0]["item_name"] == "coffee"
+
+    def test_close_list_is_a_single_event_with_no_item(self, wired_events, settings):
+        written = events.record(events.CLOSE_LIST, ["coffee", "milk"], "alex", settings, "wamid.A")
+        assert written == 1
+        assert wired_events.queries[-1].param("rows")[0]["item_name"] == ""
+
+    def test_event_ids_are_deterministic_for_the_same_message(self, wired_events, settings):
+        events.record(events.ADD_ITEM, ["coffee"], "alex", settings, "wamid.A")
+        first = wired_events.queries[-1].param("rows")[0]["event_id"]
+        events.record(events.ADD_ITEM, ["coffee"], "alex", settings, "wamid.A")
+        second = wired_events.queries[-1].param("rows")[0]["event_id"]
+        assert first == second, "a reprocessed message must not double-count in the pattern data"
+
+    def test_a_bigquery_failure_never_raises(self, wired_events, settings):
+        """Analytics must not break the user's action."""
+        wired_events.fail("INSERT INTO `nano_test.list_events`", RuntimeError("bq down"))
+        assert events.record(events.ADD_ITEM, ["coffee"], "alex", settings, "wamid.A") == 0
+
+    def test_unknown_event_types_are_refused(self, wired_events, settings):
+        assert events.record("teleport", ["coffee"], "alex", settings, "wamid.A") == 0
+        assert wired_events.queries == []
+
+    def test_empty_item_lists_write_nothing(self, wired_events, settings):
+        assert events.record(events.ADD_ITEM, ["", "   "], "alex", settings, "wamid.A") == 0
+
+
+# --------------------------------------------------------------------------
+# History answers
+# --------------------------------------------------------------------------
+
+
+class TestTotalSpend:
+    def test_empty_period_reports_the_most_recent_trip(self, wired_history, settings):
+        """The 0.00 bug.
+
+        The query was right and the answer was useless: asked moments after
+        logging a receipt, `You've spent 0.00 across 0 shopping trip(s)` reads
+        as data loss. The purchase was simply in the previous month.
+        """
+        wired_history.when("GROUP BY currency", [])
+        wired_history.when(
+            "ORDER BY purchased_at DESC",
+            [
+                {
+                    "purchased_at": datetime.datetime(2026, 8, 29),
+                    "store_name": "SUPERMERCAT EXEMPLE, S.L.",
+                    "total_amount": Decimal("21.70"),
+                    "currency": "EUR",
+                }
+            ],
+        )
+        answer = history.answer_history_query("total_spend", "this_month", None, settings)
+
+        assert "0.00" not in answer
+        assert "29 Aug" in answer
+        assert "SUPERMERCAT EXEMPLE, S.L." in answer
+        assert "EUR 21.70" in answer
+
+    def test_no_purchases_at_all_says_so_helpfully(self, wired_history, settings):
+        wired_history.when("GROUP BY currency", [])
+        wired_history.when("ORDER BY purchased_at DESC", [])
+        answer = history.answer_history_query("total_spend", "this_month", None, settings)
+        assert "haven't logged any receipts yet" in answer
+
+    def test_single_currency_total(self, wired_history, settings):
+        wired_history.when(
+            "GROUP BY currency", [{"currency": "EUR", "total": Decimal("120.40"), "trips": 4}]
+        )
+        answer = history.answer_history_query("total_spend", "this_month", None, settings)
+        assert "EUR 120.40" in answer
+        assert "4 shopping trips" in answer
+
+    def test_multiple_currencies_are_reported_separately(self, wired_history, settings):
+        """Summing EUR and BRL produces a number that means nothing."""
+        wired_history.when(
+            "GROUP BY currency",
+            [
+                {"currency": "EUR", "total": Decimal("120.40"), "trips": 4},
+                {"currency": "BRL", "total": Decimal("300.00"), "trips": 2},
+            ],
+        )
+        answer = history.answer_history_query("total_spend", "this_month", None, settings)
+        assert "EUR 120.40" in answer
+        assert "BRL 300.00" in answer
+        assert "6 shopping trips" in answer
+
+    def test_singular_trip_reads_correctly(self, wired_history, settings):
+        wired_history.when(
+            "GROUP BY currency", [{"currency": "EUR", "total": Decimal("21.70"), "trips": 1}]
+        )
+        assert "1 shopping trip." in history.answer_history_query(
+            "total_spend", "this_month", None, settings
+        )
+
+
+class TestItemsInLastPurchase:
+    def test_lists_the_items_from_the_most_recent_trip(self, wired_history, settings):
+        """ "What did we buy?" had no intent and fell through to the shopping list."""
+        wired_history.when(
+            "ORDER BY purchased_at DESC",
+            [
+                {
+                    "purchased_at": datetime.datetime(2026, 8, 29),
+                    "store_name": "SUPERMERCAT EXEMPLE, S.L.",
+                    "total_amount": Decimal("21.70"),
+                    "currency": "EUR",
+                }
+            ],
+        )
+        wired_history.when(
+            "ORDER BY pi.line_total DESC",
+            [
+                {"item_name": "OLI OLIVA 1L", "line_total": Decimal("6.45")},
+                {"item_name": "LLET SENCERA 1L", "line_total": Decimal("1.15")},
+            ],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "OLI OLIVA 1L" in answer
+        assert "LLET SENCERA 1L" in answer
+        assert "2 items" in answer
+
+    def test_no_receipts_yet(self, wired_history, settings):
+        wired_history.when("ORDER BY purchased_at DESC", [])
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "haven't logged any receipts yet" in answer
+
+
+class TestItemQueries:
+    def test_spend_by_item_groups_by_currency(self, wired_history, settings):
+        wired_history.when(
+            "GROUP BY p.currency", [{"currency": "EUR", "total": Decimal("9.20"), "times": 8}]
+        )
+        answer = history.answer_history_query("spend_by_item", item_name="milk", settings=settings)
+        assert "EUR 9.20" in answer
+        assert "8 times" in answer
+
+    def test_unknown_item_says_so(self, wired_history, settings):
+        wired_history.when("GROUP BY p.currency", [])
+        answer = history.answer_history_query(
+            "spend_by_item", item_name="caviar", settings=settings
+        )
+        assert "caviar" in answer
+
+    def test_item_query_without_a_name_asks_for_one(self, wired_history, settings):
+        assert "Which item" in history.answer_history_query("spend_by_item", settings=settings)
+
+    def test_a_query_failure_degrades_gracefully(self, wired_history, settings):
+        wired_history.fail("GROUP BY currency", RuntimeError("bq unavailable"))
+        answer = history.answer_history_query("total_spend", "this_month", None, settings)
+        assert "couldn't reach" in answer
+
+
+class TestDateRanges:
+    def test_ranges_use_the_household_timezone(self, monkeypatch, settings):
+        """UTC would put a late-evening Madrid shop on the following day."""
+        monkeypatch.setenv("HOUSEHOLD_TIMEZONE", "Europe/Madrid")
+        madrid = history.today_in_household_tz(load_settings())
+        monkeypatch.setenv("HOUSEHOLD_TIMEZONE", "Pacific/Kiritimati")
+        kiritimati = history.today_in_household_tz(load_settings())
+        assert (kiritimati - madrid).days in (0, 1)
+
+    def test_an_unknown_timezone_falls_back_to_utc(self, monkeypatch):
+        monkeypatch.setenv("HOUSEHOLD_TIMEZONE", "Middle/Earth")
+        assert history.today_in_household_tz(load_settings()) is not None
+
+    def test_this_month_starts_on_the_first(self, settings):
+        start, end = history.period_to_date_range("this_month", settings)
+        assert start.day == 1
+        assert start <= end
+
+    def test_last_month_covers_the_whole_previous_month(self, settings):
+        start, end = history.period_to_date_range("last_month", settings)
+        assert start.day == 1
+        assert end.month == start.month
+        assert (end + datetime.timedelta(days=1)).month != start.month

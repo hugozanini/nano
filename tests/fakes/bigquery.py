@@ -67,6 +67,14 @@ class FakeQueryJob:
         return iter(self.result())
 
 
+def _as_plain(value: Any) -> Any:
+    """Reduce a StructQueryParameter to a dict of field name -> value."""
+    struct_values = getattr(value, "struct_values", None)
+    if struct_values is None:
+        return value
+    return {name: getattr(field, "value", field) for name, field in dict(struct_values).items()}
+
+
 def _flatten_params(job_config: Any) -> tuple[dict[str, Any], list[Any]]:
     """Pull {name: value} out of a QueryJobConfig for easy assertions."""
     if job_config is None or not getattr(job_config, "query_parameters", None):
@@ -78,9 +86,12 @@ def _flatten_params(job_config: Any) -> tuple[dict[str, Any], list[Any]]:
         if name is None:
             continue
         if hasattr(p, "values"):  # ArrayQueryParameter
-            flat[name] = list(p.values)
+            # An array of structs is the batched-insert shape. Flatten each
+            # struct into a plain dict so tests can assert on field values
+            # directly instead of poking at SDK objects.
+            flat[name] = [_as_plain(v) for v in p.values]
         elif hasattr(p, "struct_values"):  # StructQueryParameter
-            flat[name] = dict(p.struct_values)
+            flat[name] = _as_plain(p)
         else:  # ScalarQueryParameter
             flat[name] = getattr(p, "value", None)
     return flat, raw
