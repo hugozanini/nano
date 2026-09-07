@@ -296,7 +296,7 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
     items: list[dict[str, Any]] = list(extracted.get("items") or [])
 
     # One batched call maps every line to an English term plus a category, so
-    # "how much on strawberries?" can reach a row printed as MADUIXA.
+    # "how much on apples?" can reach a row printed as POMA GOLDEN 1KG.
     mapped = canonicalise.canonicalise_items([str(i.get("item_name", "")) for i in items])
     for item, canon in zip(items, mapped, strict=False):
         item["normalized_name"] = canon["canonical"]
