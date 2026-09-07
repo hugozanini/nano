@@ -83,6 +83,65 @@ class TestBareReferencesFollowTheConversation:
         assert intent == "add_items"
 
 
+LISTED_A_PURCHASE = [
+    {
+        "text": "What have I purchase last time?",
+        "intent": "query_history",
+        "reply": (
+            "Your last trip was 29 Aug at Mercadona, EUR 43.06 for 12 items: "
+            "- 24 fresh eggs (24 OUS FRESC) - family pack breast (PIT FAM.) "
+            "- strawberry (MADUIXA)"
+        ),
+    }
+]
+
+
+class TestAskingWhatSomethingIsIsALookup:
+    """The failure: Nano listed `family pack breast (PIT FAM.)`, was asked what
+    that was, and answered "I can't work that out yet — I've noted it as a
+    feature request." Every fact was already stored, and the backlog gained an
+    entry for a capability that is not missing.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "What is family pack breast? Chicken breast?",
+            "what is PIT FAM?",
+            "what's a maduixa?",
+        ],
+    )
+    def test_asking_what_an_item_is_reaches_the_receipt_data(self, wired, text):
+        intent, args = classify(text, LISTED_A_PURCHASE, ["coffee"], "purchases")
+        assert intent == "query_history", f"{text!r} became {intent}, not a lookup"
+        assert args.get("query_type") == "explain_item"
+
+    def test_it_is_never_filed_as_a_missing_feature(self, wired):
+        intent, _ = classify(
+            "What is family pack breast? Chicken breast?",
+            LISTED_A_PURCHASE,
+            ["coffee"],
+            "purchases",
+        )
+        assert intent not in {"cannot_answer", "request_feature"}, (
+            "the backlog is for what is genuinely missing"
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("what did we buy?", "items_in_last_purchase"),
+            ("how much did we spend on strawberries?", "spend_by_item"),
+            ("when did we last buy strawberries?", "last_purchase"),
+        ],
+    )
+    def test_the_other_history_questions_still_route(self, wired, text, expected):
+        """A new enum value must not swallow the ones already there."""
+        intent, args = classify(text, [], [])
+        assert intent == "query_history"
+        assert args.get("query_type") == expected
+
+
 class TestItDoesNotAskAboutClearMessages:
     """The guard that matters most.
 
