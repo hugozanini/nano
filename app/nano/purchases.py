@@ -147,6 +147,7 @@ def log_purchase(
     receipt_uri: str = "",
     settings: Settings | None = None,
     location: Any = None,
+    store_id: str = "",
     store_address: str = "",
     tax_id: str = "",
     tax_rates: list | None = None,
@@ -183,11 +184,12 @@ def log_purchase(
         (purchase_id, purchased_at, store_name, total_amount,
          currency, receipt_image_uri, created_at,
          receipt_language, country_code, region, city_printed, city_inferred,
-         location_confidence, location_evidence, store_address, tax_id, tax_rates)
+         location_confidence, location_evidence, store_address, tax_id, tax_rates, store_id)
         SELECT @purchase_id, @purchased_at, @store_name, @total_amount,
                @currency, @receipt_image_uri, @created_at,
                @receipt_language, @country_code, @region, @city_printed, @city_inferred,
-               @location_confidence, @location_evidence, @store_address, @tax_id, @tax_rates
+               @location_confidence, @location_evidence, @store_address, @tax_id, @tax_rates,
+               @store_id
         """,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
@@ -217,6 +219,7 @@ def log_purchase(
                 bigquery.ScalarQueryParameter(
                     "location_evidence", "STRING", getattr(location, "evidence_text", "")
                 ),
+                bigquery.ScalarQueryParameter("store_id", "STRING", store_id),
                 bigquery.ScalarQueryParameter("store_address", "STRING", store_address),
                 bigquery.ScalarQueryParameter("tax_id", "STRING", tax_id),
                 bigquery.ArrayQueryParameter(

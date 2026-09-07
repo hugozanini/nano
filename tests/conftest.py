@@ -208,12 +208,13 @@ def nano_app(
     monkeypatch.setattr(clients, "vertex_initialised", lambda: True)
 
     # store/purchases/history import the getters by name, so patch them there too.
-    from nano import events, history, purchases, receipts, store
+    from nano import events, history, purchases, receipts, store, stores
 
     monkeypatch.setattr(store, "firestore_client", lambda: fake_firestore)
     monkeypatch.setattr(purchases, "bigquery_client", lambda: fake_bq)
     monkeypatch.setattr(history, "bigquery_client", lambda: fake_bq)
     monkeypatch.setattr(events, "bigquery_client", lambda: fake_bq)
+    monkeypatch.setattr(stores, "bigquery_client", lambda: fake_bq)
     monkeypatch.setattr(receipts, "storage_client", lambda: fake_storage)
 
     monkeypatch.setattr(gemini, "classifier_model", lambda: fake_gemini)

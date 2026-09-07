@@ -24,6 +24,7 @@ from nano import (
     purchases,
     receipts,
     store,
+    stores,
     whatsapp,
 )
 from nano.config import Settings, get_settings
@@ -332,8 +333,20 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
         confidence=where.confidence,
         evidence=where.evidence_text,
     )
+
     store_name = str(extracted.get("store_name") or "unknown")
     items: list[dict[str, Any]] = list(extracted.get("items") or [])
+
+    # Resolve the shop once and reuse it. Repeat visits cost no model call, and
+    # the same shop always lands on the same dimension row, so a GROUP BY does
+    # not split one supermarket across several.
+    store_id = stores.resolve(
+        store_name=store_name,
+        location=where,
+        address=str(extracted.get("store_address", "")),
+        tax_id=str(extracted.get("tax_id", "")),
+        settings=settings,
+    )
 
     # One batched call maps every line to an English term plus a category, so
     # "how much on apples?" can reach a row printed as POMA GOLDEN 1KG.
@@ -381,6 +394,7 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
             receipt_uri=receipt_uri,
             settings=settings,
             location=where,
+            store_id=store_id,
             store_address=str(extracted.get("store_address", "")),
             tax_id=str(extracted.get("tax_id", "")),
             tax_rates=locale.parse_rates(extracted.get("tax_rates")),
