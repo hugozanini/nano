@@ -108,7 +108,9 @@ class TestCanonicalisationDegradesSafely:
     def test_a_model_error_falls_back_deterministically(self):
         model = FakeGeminiModel().raises(RuntimeError("vertex unavailable"))
         result = canonicalise.canonicalise_items(["ARROS RODO 1KG"], model=model)
-        assert result == [{"canonical": "arros rodo", "category": "other"}]
+        # name_en is left empty rather than invented: a wrong translation in an
+        # analysis table is worse than an absent one.
+        assert result == [{"name_en": "", "canonical": "arros rodo", "category": "other"}]
 
     def test_a_wrong_length_response_falls_back(self):
         """Two items in, one out: the mapping cannot be trusted positionally."""
@@ -209,3 +211,45 @@ class TestPromptExamplesAreCorrect:
         for target in canonicalise.TRANSLATION_EXAMPLES.values():
             assert target == target.lower()
             assert not target.endswith("s") or target in {"couscous", "asparagus"}
+
+
+class TestTranslationAlongsideCanonical:
+    """Three columns, three jobs.
+
+    `item_name` preserves what the receipt said, `item_name_en` makes it
+    readable, and `normalized_name` collapses variants so a question about milk
+    reaches every carton however it was labelled. Analysis wants all three.
+    """
+
+    def test_translation_and_canonical_are_both_returned(self):
+        model = FakeGeminiModel().queue_json(
+            [{"name_en": "whole milk, 1L", "canonical": "milk", "category": "dairy"}]
+        )
+        result = canonicalise.canonicalise_items(["LLET SENCERA 1L"], model=model)[0]
+        assert result["name_en"] == "whole milk, 1L"
+        assert result["canonical"] == "milk"
+
+    def test_the_translation_keeps_detail_the_canonical_drops(self):
+        model = FakeGeminiModel().queue_json(
+            [
+                {"name_en": "whole milk, 1L", "canonical": "milk", "category": "dairy"},
+                {"name_en": "semi-skimmed milk, 2L", "canonical": "milk", "category": "dairy"},
+            ]
+        )
+        result = canonicalise.canonicalise_items(["LLET SENCERA 1L", "LLET SEMI 2L"], model=model)
+        assert result[0]["name_en"] != result[1]["name_en"], "translations stay distinct"
+        assert result[0]["canonical"] == result[1]["canonical"] == "milk", "concepts group"
+
+    def test_a_missing_translation_is_empty_not_guessed(self):
+        model = FakeGeminiModel().queue_json([{"canonical": "milk", "category": "dairy"}])
+        assert canonicalise.canonicalise_items(["LLET"], model=model)[0]["name_en"] == ""
+
+    def test_the_prompt_asks_for_all_three_fields(self):
+        model = FakeGeminiModel().queue_json(
+            [{"name_en": "milk", "canonical": "milk", "category": "dairy"}]
+        )
+        canonicalise.canonicalise_items(["LLET"], model=model)
+        prompt = model.calls[-1].parts[0]
+        assert "name_en" in prompt
+        assert "canonical" in prompt
+        assert "category" in prompt

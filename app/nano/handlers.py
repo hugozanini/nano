@@ -18,6 +18,7 @@ from typing import Any
 from nano import (
     canonicalise,
     events,
+    fx,
     gemini,
     history,
     locale,
@@ -354,6 +355,32 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
     for item, canon in zip(items, mapped, strict=False):
         item["normalized_name"] = canon["canonical"]
         item["category"] = canon["category"]
+        item["item_name_en"] = canon.get("name_en", "")
+
+    # One comparable money column, at the rate that applied on the purchase
+    # date rather than today's, so last year's totals still reconcile.
+    total_eur, rate, rate_date = fx.to_base(
+        extracted.get("total_amount", 0), currency, purchased_on, settings
+    )
+    if rate is not None:
+        for item in items:
+            line_eur, _, _ = fx.to_base(item.get("line_total", 0), currency, purchased_on, settings)
+            item["line_total_eur"] = line_eur
+        log_with(
+            logger,
+            logging.INFO,
+            "converted purchase to EUR",
+            currency=currency,
+            rate=str(rate),
+            rate_date=str(rate_date),
+        )
+    else:
+        log_with(
+            logger,
+            logging.WARNING,
+            "no exchange rate available; EUR columns left empty",
+            currency=currency,
+        )
 
     # A person re-photographing the same receipt is a different message, so
     # message-id idempotency does not catch it, and the spend silently doubles.
@@ -398,6 +425,9 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
             store_address=str(extracted.get("store_address", "")),
             tax_id=str(extracted.get("tax_id", "")),
             tax_rates=locale.parse_rates(extracted.get("tax_rates")),
+            amount_eur=total_eur,
+            fx_rate=rate,
+            fx_rate_date=rate_date,
         )
     except Exception as exc:
         log_with(logger, logging.ERROR, "could not record purchase", error=str(exc))

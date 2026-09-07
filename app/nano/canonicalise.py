@@ -84,12 +84,13 @@ Do not infer a product from what commonly appears on a supermarket receipt. If t
 Worked examples:
 {examples}
 
-For each input line return:
-- "canonical": as described above.
+For each input line return three fields:
+- "name_en": a faithful English translation of the whole line, keeping pack size and count, e.g. "LLET SENCERA 1L" -> "whole milk, 1L", "OUS M-12" -> "eggs, size M, 12 pack". This preserves what the receipt actually said.
+- "canonical": the plain product concept as described above, e.g. "milk", "egg". This is what groups variants together.
 - "category": exactly one of {categories}.
 
 Return ONLY a JSON array, one object per input line, in the same order, each shaped:
-{{"canonical": string, "category": string}}
+{{"name_en": string, "canonical": string, "category": string}}
 
 Input lines:
 {lines}"""
@@ -144,6 +145,7 @@ def _parse_response(text: str, expected: int) -> list[dict[str, str]] | None:
         category = str(entry.get("category", "")).strip().lower()
         result.append(
             {
+                "name_en": str(entry.get("name_en", "")).strip(),
                 "canonical": canonical,
                 "category": category if category in CATEGORIES else "other",
             }
@@ -162,8 +164,14 @@ def canonicalise_items(names: list[str], model: Any = None) -> list[dict[str, st
     if not cleaned:
         return []
 
+    # A failed translation leaves name_en empty rather than inventing one: a
+    # wrong translation in an analysis table is worse than an absent one.
     fallback = [
-        {"canonical": fallback_normalise(name) or name.lower(), "category": "other"}
+        {
+            "name_en": "",
+            "canonical": fallback_normalise(name) or name.lower(),
+            "category": "other",
+        }
         for name in cleaned
     ]
 

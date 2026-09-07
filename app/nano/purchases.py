@@ -101,6 +101,8 @@ def _item_rows_parameter(purchase_id: str, items: list[dict[str, Any]]):
         bigquery.ScalarQueryParameterType("STRING", name="item_name"),
         bigquery.ScalarQueryParameterType("STRING", name="normalized_name"),
         bigquery.ScalarQueryParameterType("STRING", name="category"),
+        bigquery.ScalarQueryParameterType("STRING", name="item_name_en"),
+        bigquery.ScalarQueryParameterType("NUMERIC", name="line_total_eur"),
         bigquery.ScalarQueryParameterType("NUMERIC", name="quantity"),
         bigquery.ScalarQueryParameterType("NUMERIC", name="unit_price"),
         bigquery.ScalarQueryParameterType("NUMERIC", name="line_total"),
@@ -121,6 +123,14 @@ def _item_rows_parameter(purchase_id: str, items: list[dict[str, Any]]):
                 ),
                 bigquery.ScalarQueryParameter(
                     "category", "STRING", str(item.get("category") or "other")
+                ),
+                bigquery.ScalarQueryParameter(
+                    "item_name_en", "STRING", str(item.get("item_name_en") or "")
+                ),
+                bigquery.ScalarQueryParameter(
+                    "line_total_eur",
+                    "NUMERIC",
+                    None if item.get("line_total_eur") is None else str(item["line_total_eur"]),
                 ),
                 bigquery.ScalarQueryParameter(
                     "quantity", "NUMERIC", str(item.get("quantity", 1) or 1)
@@ -151,6 +161,9 @@ def log_purchase(
     store_address: str = "",
     tax_id: str = "",
     tax_rates: list | None = None,
+    amount_eur=None,
+    fx_rate=None,
+    fx_rate_date=None,
 ) -> tuple[str, bool]:
     """Write one purchase and its line items.
 
@@ -184,12 +197,13 @@ def log_purchase(
         (purchase_id, purchased_at, store_name, total_amount,
          currency, receipt_image_uri, created_at,
          receipt_language, country_code, region, city_printed, city_inferred,
-         location_confidence, location_evidence, store_address, tax_id, tax_rates, store_id)
+         location_confidence, location_evidence, store_address, tax_id, tax_rates, store_id,
+         amount_eur, fx_rate, fx_rate_date)
         SELECT @purchase_id, @purchased_at, @store_name, @total_amount,
                @currency, @receipt_image_uri, @created_at,
                @receipt_language, @country_code, @region, @city_printed, @city_inferred,
                @location_confidence, @location_evidence, @store_address, @tax_id, @tax_rates,
-               @store_id
+               @store_id, @amount_eur, @fx_rate, @fx_rate_date
         """,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
@@ -220,6 +234,13 @@ def log_purchase(
                     "location_evidence", "STRING", getattr(location, "evidence_text", "")
                 ),
                 bigquery.ScalarQueryParameter("store_id", "STRING", store_id),
+                bigquery.ScalarQueryParameter(
+                    "amount_eur", "NUMERIC", None if amount_eur is None else str(amount_eur)
+                ),
+                bigquery.ScalarQueryParameter(
+                    "fx_rate", "NUMERIC", None if fx_rate is None else str(fx_rate)
+                ),
+                bigquery.ScalarQueryParameter("fx_rate_date", "DATE", fx_rate_date),
                 bigquery.ScalarQueryParameter("store_address", "STRING", store_address),
                 bigquery.ScalarQueryParameter("tax_id", "STRING", tax_id),
                 bigquery.ArrayQueryParameter(
@@ -233,10 +254,10 @@ def log_purchase(
         client.query(
             f"""
             INSERT INTO `{settings.table("purchase_items")}`
-            (purchase_id, item_name, normalized_name, category,
-             quantity, unit_price, line_total)
-            SELECT purchase_id, item_name, normalized_name, category,
-                   quantity, unit_price, line_total
+            (purchase_id, item_name, normalized_name, category, item_name_en,
+             line_total_eur, quantity, unit_price, line_total)
+            SELECT purchase_id, item_name, normalized_name, category, item_name_en,
+                   line_total_eur, quantity, unit_price, line_total
             FROM UNNEST(@rows)
             """,
             job_config=bigquery.QueryJobConfig(
