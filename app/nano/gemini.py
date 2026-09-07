@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are Nano, a grocery list assistant for a couple. "
-    "Classify the user's message into exactly one of the available functions. "
-    "Only handle grocery-list and purchase-history actions; if the message doesn't "
-    "clearly match add_items, remove_items, close_list, or query_history, call get_list."
+    "Classify the user's message into exactly one of the available functions.\n"
+    "The recent conversation and the current list are given for context: use them "
+    "to resolve short follow-ups and corrections. 'no, the decaf one' after adding "
+    "coffee means remove_items ['coffee'] and add_items ['decaf coffee']; 'remove "
+    "that' refers to whatever was just added; 'undo' reverses the last change.\n"
+    "If the message is a greeting, a question about your abilities, or makes no "
+    "sense as a grocery request, call help. If it is a request to see the list, "
+    "call get_list."
 )
 
 RECEIPT_PROMPT = """Extract structured data from this grocery receipt image. Return ONLY valid JSON, no markdown fences, no explanation, matching exactly this shape:
@@ -90,6 +95,23 @@ def _function_declarations():
             description=(
                 "Clear the entire shopping list, typically said right after a shopping "
                 "trip is finished."
+            ),
+            parameters={"type": "object", "properties": {}},
+        ),
+        FunctionDeclaration(
+            name="undo",
+            description=(
+                "Reverse the most recent change to the list, for messages like "
+                "'undo', 'no wait', 'put that back' or 'I didn't mean that'."
+            ),
+            parameters={"type": "object", "properties": {}},
+        ),
+        FunctionDeclaration(
+            name="help",
+            description=(
+                "Explain what this assistant can do. Use for greetings, 'help', "
+                "'what can you do', or a message that makes no sense as a "
+                "grocery request."
             ),
             parameters={"type": "object", "properties": {}},
         ),
@@ -174,12 +196,44 @@ def _first_part(response: Any):
     return parts[0] if parts else None
 
 
-def classify_message(text: str, model: Any = None) -> tuple[str, dict[str, Any]]:
+def build_context(turns: list[dict[str, Any]] | None, current_items: list[str] | None) -> str:
+    """Render recent exchanges and list state for the classification prompt.
+
+    Without this every message is classified in isolation, so "no, the decaf
+    one" and "remove that" have nothing to refer back to.
+    """
+    sections = []
+
+    if current_items:
+        sections.append("Current list: " + ", ".join(current_items))
+    else:
+        sections.append("Current list: (empty)")
+
+    if turns:
+        lines = []
+        for turn in turns[-6:]:
+            said = str(turn.get("text", "")).strip()
+            intent = str(turn.get("intent", "")).strip()
+            if said:
+                lines.append(f'- they said "{said}" -> {intent or "unknown"}')
+        if lines:
+            sections.append("Recent messages:\n" + "\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
+def classify_message(
+    text: str,
+    model: Any = None,
+    turns: list[dict[str, Any]] | None = None,
+    current_items: list[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Classify a message into (intent, arguments). Falls back to get_list."""
     model = model or classifier_model()
+    context = build_context(turns, current_items)
     try:
         chat = model.start_chat()
-        response = chat.send_message(f"{SYSTEM_PROMPT}\n\nMessage: {text}")
+        response = chat.send_message(f"{SYSTEM_PROMPT}\n\n{context}\n\nMessage: {text}")
     except Exception as exc:
         log_with(logger, logging.ERROR, "gemini classification failed", error=str(exc))
         return "get_list", {}

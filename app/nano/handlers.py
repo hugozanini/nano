@@ -25,6 +25,64 @@ logger = logging.getLogger(__name__)
 UNSUPPORTED_REPLY = "I can only read text and receipt photos for now."
 RECEIPT_FAILED_REPLY = "I couldn't read that receipt clearly — could you try a clearer photo?"
 
+HELP_REPLY = """I'm Nano, your shared grocery list \U0001f6d2
+
+*The list*
+- "we're out of coffee" or "add tomatoes and basil" — I'll add them
+- "what's on the list?" — I'll show it
+- "remove milk" — I'll take it off
+- "clear the list" — after a shop (I'll check first)
+- "undo" — reverses my last change
+
+*Receipts*
+Send me a photo and I'll log the store, date and every line item, then tick off
+whatever you'd already listed.
+
+*Spending*
+- "how much did we spend this month?"
+- "what did we buy?"
+- "when did we last buy olive oil?"
+- "how much do we spend on milk?"
+
+Changes go to both of you; answers to questions come back just to whoever asked."""
+
+# Checked before the model sees the message, but only while a confirmation is
+# outstanding. "yes" is unambiguous in that moment and does not need an LLM.
+AFFIRMATIVE = {
+    "yes",
+    "y",
+    "yeah",
+    "yep",
+    "yup",
+    "ok",
+    "okay",
+    "sure",
+    "confirm",
+    "confirmed",
+    "do it",
+    "go ahead",
+    "please",
+    "si",
+    "sí",
+    "sim",
+    "vale",
+    "dale",
+}
+NEGATIVE = {
+    "no",
+    "n",
+    "nope",
+    "nah",
+    "cancel",
+    "stop",
+    "don't",
+    "dont",
+    "wait",
+    "nao",
+    "não",
+    "no gracias",
+}
+
 
 def format_list(items: list[str]) -> str:
     if not items:
@@ -67,46 +125,152 @@ def handle_message(message: InboundMessage, settings: Settings | None = None) ->
 
 
 def _handle_text(message: InboundMessage, settings: Settings) -> str:
-    intent, args = gemini.classify_message(message.text)
     sender_name = settings.name_for(message.sender)
+    text = message.text.strip()
+
+    # A confirmation only means "yes" while something is actually pending, so
+    # this is checked first and only then.
+    pending = store.take_pending(message.sender, settings)
+    if pending:
+        resolved = _resolve_pending(message, text, pending, sender_name, settings)
+        if resolved is not None:
+            return resolved
+
+    conversation = store.get_conversation(message.sender, settings)
+    current = store.get_items(settings)
+
+    intent, args = gemini.classify_message(
+        text,
+        turns=conversation.get("turns"),
+        current_items=current,
+    )
     log_with(logger, logging.INFO, "classified message", intent=intent, sender=sender_name)
 
+    reply = _apply_intent(intent, args, message, current, sender_name, settings)
+    store.record_turn(message.sender, text, intent, settings, reply)
+    return intent
+
+
+def _resolve_pending(
+    message: InboundMessage,
+    text: str,
+    pending: dict[str, Any],
+    sender_name: str,
+    settings: Settings,
+) -> str | None:
+    """Handle a yes/no answer to an outstanding confirmation.
+
+    Returns the intent when the message was an answer, or None to let it be
+    classified normally — someone may simply have changed the subject.
+    """
+    answer = text.lower().strip(" .!?")
+
+    if answer in AFFIRMATIVE and pending.get("action") == "close_list":
+        previous = list(pending.get("items") or [])
+        store.close_list(settings)
+        store.record_action(message.sender, "close_list", [], previous, settings)
+        events.record(events.CLOSE_LIST, previous, sender_name, settings, message.id)
+        _broadcast("List cleared — happy shopping! \U0001f6d2", settings)
+        return "close_list"
+
+    if answer in NEGATIVE:
+        _reply(message.sender, "Left the list as it is.", settings)
+        return "cancelled"
+
+    return None
+
+
+def _apply_intent(
+    intent: str,
+    args: dict[str, Any],
+    message: InboundMessage,
+    current: list[str],
+    sender_name: str,
+    settings: Settings,
+) -> str:
+    """Carry out one classified intent and return the reply that was sent."""
     if intent == "add_items":
         requested = [str(i) for i in (args.get("items") or [])]
         items = store.add_items(requested, settings)
         events.record(events.ADD_ITEM, requested, sender_name, settings, message.id)
-        _broadcast(f"Added! {format_list(items)}", settings)
+        store.record_action(message.sender, "add_items", requested, current, settings)
+        reply = f"Added! {format_list(items)}"
+        _broadcast(reply, settings)
+        return reply
 
-    elif intent == "remove_items":
+    if intent == "remove_items":
         requested = [str(i) for i in (args.get("items") or [])]
         items = store.remove_items(requested, settings)
         events.record(events.REMOVE_ITEM, requested, sender_name, settings, message.id)
-        _broadcast(f"Removed. {format_list(items)}", settings)
+        store.record_action(message.sender, "remove_items", requested, current, settings)
+        reply = f"Removed. {format_list(items)}"
+        _broadcast(reply, settings)
+        return reply
 
-    elif intent == "close_list":
-        cleared = store.get_items(settings)
-        store.close_list(settings)
-        events.record(events.CLOSE_LIST, cleared, sender_name, settings, message.id)
-        _broadcast("List cleared — happy shopping! 🛒", settings)
+    if intent == "close_list":
+        # Destructive and easy to say by accident, so confirm when there is
+        # something to lose.
+        if not current:
+            reply = "The list is already empty \U0001f389"
+            _reply(message.sender, reply, settings)
+            return reply
+        store.set_pending(message.sender, "close_list", current, settings)
+        reply = (
+            f"That'll clear all {len(current)} items "
+            f"({', '.join(current[:3])}{'…' if len(current) > 3 else ''}). "
+            "Reply 'yes' to confirm."
+        )
+        _reply(message.sender, reply, settings)
+        return reply
 
-    elif intent == "query_history":
-        # The question's item name goes through the same mapping as the stored
-        # rows, or an English question can never match a Catalan receipt line.
+    if intent == "undo":
+        reply = _undo(message.sender, sender_name, message.id, settings)
+        _broadcast(reply, settings)
+        return reply
+
+    if intent == "help":
+        _reply(message.sender, HELP_REPLY, settings)
+        return HELP_REPLY
+
+    if intent == "query_history":
         raw_item = args.get("item_name")
         item = canonicalise.canonicalise_query(raw_item) if raw_item else None
-        answer = history.answer_history_query(
+        reply = history.answer_history_query(
             args.get("query_type"),
             args.get("period", "this_month"),
             item or raw_item,
             settings,
             display_name=raw_item,
         )
-        _reply(message.sender, answer, settings)
+        _reply(message.sender, reply, settings)
+        return reply
 
-    else:
-        _reply(message.sender, format_list(store.get_items(settings)), settings)
+    reply = format_list(current)
+    _reply(message.sender, reply, settings)
+    return reply
 
-    return intent
+
+def _undo(sender: str, sender_name: str, message_id: str, settings: Settings) -> str:
+    """Restore the list to what it was before the last change.
+
+    Restoring the whole previous list, rather than inverting the operation, is
+    deliberate: it is correct even when the original change partly no-opped, for
+    instance adding an item that was already there.
+    """
+    action = store.take_last_action(sender, settings)
+    if not action:
+        return "There's nothing for me to undo."
+
+    previous = list(action.get("previous") or [])
+    store.replace_items(previous, settings)
+    events.record(events.REMOVE_ITEM, list(action.get("items") or []), sender_name, settings, "")
+
+    verb = {
+        "add_items": "adding",
+        "remove_items": "removing",
+        "close_list": "clearing the list",
+    }.get(str(action.get("action")), "that")
+    return f"Undone — reversed {verb}. {format_list(previous)}"
 
 
 def _handle_receipt(message: InboundMessage, settings: Settings) -> None:

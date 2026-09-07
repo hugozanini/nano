@@ -203,6 +203,17 @@ def close_list(settings: Settings | None = None) -> list[str]:
     return _mutate(settings, lambda _current: [])
 
 
+def replace_items(items: list[str], settings: Settings | None = None) -> list[str]:
+    """Set the list to exactly these items.
+
+    Used by undo, which restores the whole previous list rather than inverting
+    the last operation — correct even when the original change partly no-opped,
+    such as adding an item that was already there.
+    """
+    settings = settings or get_settings()
+    return _mutate(settings, lambda _current: list(items))
+
+
 def clear_matched_items(purchased: list[str], settings: Settings | None = None) -> list[str]:
     """Remove list entries that a receipt shows were bought.
 
@@ -232,3 +243,121 @@ def _tokenise(value: str) -> list[str]:
         for token in "".join(ch.lower() if ch.isalnum() else " " for ch in value).split()
         if len(token) > 2
     ]
+
+
+# --------------------------------------------------------------------------
+# Conversation memory
+# --------------------------------------------------------------------------
+
+# How many exchanges to carry into the next classification. Enough for a
+# correction to refer back to what it is correcting, short enough that the
+# prompt stays cheap and the model is not tempted to re-answer old messages.
+MEMORY_TURNS = 6
+
+# A pending confirmation older than this is stale — answering "yes" twenty
+# minutes later almost certainly means something else.
+PENDING_TTL = datetime.timedelta(minutes=10)
+
+
+def _conversations(settings: Settings):
+    return firestore_client().collection(settings.collection("conversations"))
+
+
+def get_conversation(sender: str, settings: Settings | None = None) -> dict[str, Any]:
+    settings = settings or get_settings()
+    try:
+        snapshot = _conversations(settings).document(sender).get()
+    except Exception as exc:  # pragma: no cover - defensive
+        log_with(logger, logging.WARNING, "could not read conversation", error=str(exc))
+        return {}
+    return (snapshot.to_dict() or {}) if snapshot.exists else {}
+
+
+def _save_conversation(sender: str, data: dict[str, Any], settings: Settings) -> None:
+    try:
+        _conversations(settings).document(sender).set(data)
+    except Exception as exc:  # pragma: no cover - defensive
+        log_with(logger, logging.WARNING, "could not save conversation", error=str(exc))
+
+
+def record_turn(
+    sender: str,
+    text: str,
+    intent: str,
+    settings: Settings | None = None,
+    reply: str = "",
+) -> None:
+    """Append an exchange, keeping only the most recent MEMORY_TURNS."""
+    settings = settings or get_settings()
+    conversation = get_conversation(sender, settings)
+    turns = list(conversation.get("turns") or [])
+    turns.append(
+        {
+            "text": text[:400],
+            "intent": intent,
+            "reply": reply[:200],
+            "at": _now(),
+        }
+    )
+    conversation["turns"] = turns[-MEMORY_TURNS:]
+    _save_conversation(sender, conversation, settings)
+
+
+def record_action(
+    sender: str,
+    action: str,
+    items: list[str],
+    previous: list[str],
+    settings: Settings | None = None,
+) -> None:
+    """Remember the last reversible action, and what to restore to undo it."""
+    settings = settings or get_settings()
+    conversation = get_conversation(sender, settings)
+    conversation["last_action"] = {
+        "action": action,
+        "items": items,
+        "previous": previous,
+        "at": _now(),
+    }
+    _save_conversation(sender, conversation, settings)
+
+
+def take_last_action(sender: str, settings: Settings | None = None) -> dict[str, Any] | None:
+    """Read and clear the last action, so an undo cannot be applied twice."""
+    settings = settings or get_settings()
+    conversation = get_conversation(sender, settings)
+    action = conversation.get("last_action")
+    if not action:
+        return None
+    conversation.pop("last_action", None)
+    _save_conversation(sender, conversation, settings)
+    return action
+
+
+def set_pending(
+    sender: str, action: str, items: list[str], settings: Settings | None = None
+) -> None:
+    settings = settings or get_settings()
+    conversation = get_conversation(sender, settings)
+    conversation["pending"] = {"action": action, "items": items, "at": _now()}
+    _save_conversation(sender, conversation, settings)
+
+
+def take_pending(sender: str, settings: Settings | None = None) -> dict[str, Any] | None:
+    """Read and clear a pending confirmation, ignoring stale ones."""
+    settings = settings or get_settings()
+    conversation = get_conversation(sender, settings)
+    pending = conversation.get("pending")
+    if not pending:
+        return None
+
+    conversation.pop("pending", None)
+    _save_conversation(sender, conversation, settings)
+
+    raised_at = pending.get("at")
+    if isinstance(raised_at, datetime.datetime):
+        age = _now() - raised_at.replace(tzinfo=raised_at.tzinfo or datetime.UTC)
+        if age > PENDING_TTL:
+            log_with(logger, logging.INFO, "ignoring a stale pending confirmation")
+            return None
+    return pending

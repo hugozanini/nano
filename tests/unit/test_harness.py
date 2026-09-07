@@ -186,10 +186,25 @@ class TestFakeGemini:
         assert fake_gemini.generate_content("a").text == "first"
         assert fake_gemini.generate_content("b").text == "second"
 
-    def test_last_response_repeats_once_queue_is_drained(self, fake_gemini: FakeGeminiModel):
-        fake_gemini.queue_text("only")
-        assert fake_gemini.generate_content("a").text == "only"
-        assert fake_gemini.generate_content("b").text == "only"
+    def test_the_queue_is_strict_fifo(self, fake_gemini: FakeGeminiModel):
+        """Responses are never replayed.
+
+        An earlier version returned the last queued response forever once only
+        one remained, which silently replayed a stale response whenever a test
+        queued incrementally between calls — it made an undo test look like the
+        feature was broken when the fake was.
+        """
+        fake_gemini.queue_text("first")
+        assert fake_gemini.generate_content("a").text == "first"
+        fake_gemini.queue_text("second")
+        assert fake_gemini.generate_content("b").text == "second"
+
+    def test_a_default_covers_calls_past_the_queue(self, fake_gemini: FakeGeminiModel):
+        fake_gemini.set_default_function_call("get_list")
+        fake_gemini.queue_text("scripted")
+        assert fake_gemini.generate_content("a").text == "scripted"
+        part = fake_gemini.generate_content("b").candidates[0].content.parts[0]
+        assert part.function_call.name == "get_list"
 
     def test_empty_candidates_response_is_scriptable(self, fake_gemini: FakeGeminiModel):
         """Safety blocks return no candidates; today that IndexErrors in main.py."""
