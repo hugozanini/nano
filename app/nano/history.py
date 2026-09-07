@@ -88,7 +88,7 @@ def most_recent_purchase(settings: Settings) -> dict | None:
     """The latest trip, used to give an empty result something to say."""
     rows = _query(
         f"""
-        SELECT purchased_at, store_name, total_amount, currency
+        SELECT purchase_id, purchased_at, store_name, total_amount, currency
         FROM `{settings.table("purchases")}`
         ORDER BY purchased_at DESC, created_at DESC
         LIMIT 1
@@ -100,6 +100,7 @@ def most_recent_purchase(settings: Settings) -> dict | None:
         return None
     row = rows[0]
     return {
+        "purchase_id": row.purchase_id,
         "date": row.purchased_at.date(),
         "store": row.store_name,
         "total": row.total_amount,
@@ -207,13 +208,12 @@ def _items_in_last_purchase(settings: Settings) -> str:
 
     rows = _query(
         f"""
-        SELECT pi.item_name, pi.line_total
-        FROM `{settings.table("purchase_items")}` pi
-        JOIN `{settings.table("purchases")}` p ON p.purchase_id = pi.purchase_id
-        WHERE DATE(p.purchased_at) = @purchased_on
-        ORDER BY pi.line_total DESC
+        SELECT item_name, line_total
+        FROM `{settings.table("purchase_items")}`
+        WHERE purchase_id = @purchase_id
+        ORDER BY line_total DESC
         """,
-        [bigquery.ScalarQueryParameter("purchased_on", "DATE", latest["date"])],
+        [bigquery.ScalarQueryParameter("purchase_id", "STRING", latest["purchase_id"])],
         settings,
     )
     if not rows:

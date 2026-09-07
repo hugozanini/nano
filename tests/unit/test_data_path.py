@@ -206,6 +206,7 @@ class TestTotalSpend:
             "ORDER BY purchased_at DESC",
             [
                 {
+                    "purchase_id": "p-1",
                     "purchased_at": datetime.datetime(2026, 8, 29),
                     "store_name": "SUPERMERCAT EXEMPLE, S.L.",
                     "total_amount": Decimal("21.70"),
@@ -264,6 +265,7 @@ class TestItemsInLastPurchase:
             "ORDER BY purchased_at DESC",
             [
                 {
+                    "purchase_id": "p-1",
                     "purchased_at": datetime.datetime(2026, 8, 29),
                     "store_name": "SUPERMERCAT EXEMPLE, S.L.",
                     "total_amount": Decimal("21.70"),
@@ -272,7 +274,7 @@ class TestItemsInLastPurchase:
             ],
         )
         wired_history.when(
-            "ORDER BY pi.line_total DESC",
+            "ORDER BY line_total DESC",
             [
                 {"item_name": "OLI OLIVA 1L", "line_total": Decimal("6.45")},
                 {"item_name": "LLET SENCERA 1L", "line_total": Decimal("1.15")},
@@ -337,3 +339,56 @@ class TestDateRanges:
         assert start.day == 1
         assert end.month == start.month
         assert (end + datetime.timedelta(days=1)).month != start.month
+
+
+class TestItemsAreScopedToOnePurchase:
+    """Regression: "what did we buy?" listed 24 items from a 12-item receipt.
+
+    The query filtered by `DATE(purchased_at)` rather than by `purchase_id`.
+    Two purchases happened to share a date — the same shop photographed twice —
+    so the join returned every line item twice.
+    """
+
+    def test_only_the_latest_purchase_is_listed(self, wired_history, settings):
+        wired_history.when(
+            "ORDER BY purchased_at DESC",
+            [
+                {
+                    "purchase_id": "newest",
+                    "purchased_at": datetime.datetime(2026, 8, 29),
+                    "store_name": "SUPERMERCAT EXEMPLE, S.L.",
+                    "total_amount": Decimal("21.70"),
+                    "currency": "EUR",
+                }
+            ],
+        )
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [{"item_name": "OLI OLIVA 1L", "line_total": Decimal("6.45")}],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+
+        assert "1 items" in answer
+        item_query = wired_history.statements_matching("ORDER BY line_total DESC")[-1]
+        assert item_query.param("purchase_id") == "newest"
+
+    def test_the_item_query_does_not_filter_by_date(self, wired_history, settings):
+        """Filtering by date is what let a second purchase bleed in."""
+        wired_history.when(
+            "ORDER BY purchased_at DESC",
+            [
+                {
+                    "purchase_id": "newest",
+                    "purchased_at": datetime.datetime(2026, 8, 29),
+                    "store_name": "S",
+                    "total_amount": Decimal("1.00"),
+                    "currency": "EUR",
+                }
+            ],
+        )
+        wired_history.when("ORDER BY line_total DESC", [])
+        history.answer_history_query("items_in_last_purchase", settings=settings)
+
+        sql = wired_history.statements_matching("ORDER BY line_total DESC")[-1].sql
+        assert "purchase_id = @purchase_id" in " ".join(sql.split())
+        assert "DATE(p.purchased_at)" not in sql

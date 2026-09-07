@@ -36,6 +36,45 @@ def purchase_id_for(message_id: str) -> str:
     return str(uuid.uuid5(PURCHASE_NAMESPACE, message_id))
 
 
+def find_matching_purchase(
+    store_name: str,
+    purchase_date: str,
+    total_amount: Any,
+    settings: Settings | None = None,
+) -> str | None:
+    """Find an existing purchase for the same shop, day and total.
+
+    Message-id idempotency stops a *redelivery* creating a duplicate, but it
+    cannot stop a person photographing the same receipt twice — different
+    message, same trip, and the recorded spend silently doubles. Which is
+    exactly what happened: one EUR 43.06 shop became EUR 86.12.
+    """
+    from google.cloud import bigquery
+
+    settings = settings or get_settings()
+    rows = list(
+        bigquery_client()
+        .query(
+            f"""
+            SELECT purchase_id FROM `{settings.table("purchases")}`
+            WHERE store_name = @store
+              AND DATE(purchased_at) = @purchased_on
+              AND total_amount = @total
+            LIMIT 1
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("store", "STRING", store_name),
+                    bigquery.ScalarQueryParameter("purchased_on", "DATE", purchase_date),
+                    bigquery.ScalarQueryParameter("total", "NUMERIC", str(total_amount)),
+                ]
+            ),
+        )
+        .result()
+    )
+    return rows[0].purchase_id if rows else None
+
+
 def purchase_exists(purchase_id: str, settings: Settings | None = None) -> bool:
     from google.cloud import bigquery
 
