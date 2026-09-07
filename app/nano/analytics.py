@@ -93,6 +93,7 @@ Rules:
 - Reference only the views listed above.
 - Always include a LIMIT of at most {max_rows}.
 - Use `item_canonical` to group products, because `item_name_original` is printed in the shop's own language and abbreviations.
+- When an item name is SELECTed for display, use `item_name_english`, never `item_name_original`. Answers are always in English.
 - Use `line_total_eur` when comparing or summing money across shops or countries; `line_total` is in the receipt's own currency.
 - Alias EVERY selected expression with a clear name. An unnamed column arrives as `f0_` and the answer cannot describe it.
 - When returning an amount in euros, alias it so the unit is unmistakable, e.g. `SUM(line_total_eur) AS total_eur`. When returning an amount in the receipt's own currency, also select `currency`.
@@ -118,6 +119,8 @@ The query returned {row_count} row(s):
 {rows}
 
 Write a short, direct answer — one or two sentences, plain text, no markdown tables. Quote the actual numbers.
+
+Always answer in English, even when the rows contain item names in another language. The receipts are Catalan, Spanish or Portuguese; the answer is English. If a row only has a non-English name, translate it.
 
 Currency: a column whose name ends in `_eur` is euros — write it as EUR. Otherwise use the `currency` value in the rows. Never introduce a currency symbol that the data does not support; guessing the wrong one is a real error in a spending assistant.
 
