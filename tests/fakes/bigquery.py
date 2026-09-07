@@ -47,16 +47,41 @@ class RecordedQuery:
     sql: str
     params: dict[str, Any] = field(default_factory=dict)
     raw_params: list[Any] = field(default_factory=list)
+    # Job-level settings, so tests can assert on cost ceilings and dry runs
+    # rather than only on the SQL text.
+    maximum_bytes_billed: int | None = None
+    dry_run: bool = False
 
     def param(self, name: str) -> Any:
         return self.params.get(name)
 
 
+class FakeTableRef:
+    """Matches the shape of a bigquery.TableReference for dry-run assertions."""
+
+    def __init__(self, dataset_id: str, table_id: str, project: str = "test-project"):
+        self.dataset_id = dataset_id
+        self.table_id = table_id
+        self.project = project
+
+
 class FakeQueryJob:
-    def __init__(self, rows: list[FakeRow], error: Exception | None = None):
+    def __init__(
+        self,
+        rows: list[FakeRow],
+        error: Exception | None = None,
+        statement_type: str = "SELECT",
+        referenced_tables: list[FakeTableRef] | None = None,
+        total_bytes_processed: int = 0,
+    ):
         self._rows = rows
         self._error = error
         self.num_dml_affected_rows = len(rows)
+        # Dry-run surface. BigQuery reports these without executing anything,
+        # which is what the analytics validation relies on.
+        self.statement_type = statement_type
+        self.referenced_tables = referenced_tables or []
+        self.total_bytes_processed = total_bytes_processed
 
     def result(self, *args, **kwargs):
         if self._error is not None:
@@ -101,9 +126,18 @@ class FakeBigQueryClient:
     def __init__(self, project: str = "nano-test-project"):
         self.project = project
         self.queries: list[RecordedQuery] = []
+        self.dry_runs: list[str] = []
         self._responses: list[tuple[str, list[FakeRow]]] = []
         self._errors: list[tuple[str, Exception]] = []
         self.default_rows: list[FakeRow] = []
+        # What a dry run reports back. Defaults describe a harmless SELECT
+        # against the allowed dataset; tests override to exercise each guard.
+        self.dry_run_statement_type = "SELECT"
+        self.dry_run_tables: list[FakeTableRef] = [
+            FakeTableRef("nano_test", "v_purchase_items_normalized")
+        ]
+        self.dry_run_bytes = 1024
+        self.dry_run_error: Exception | None = None
 
     # --- scripting ----------------------------------------------------------
 
@@ -118,9 +152,43 @@ class FakeBigQueryClient:
 
     # --- client surface -----------------------------------------------------
 
+    def dry_run_reports(
+        self,
+        statement_type: str = "SELECT",
+        tables: list[tuple[str, str]] | None = None,
+        total_bytes: int = 1024,
+        error: Exception | None = None,
+    ) -> FakeBigQueryClient:
+        """Script what the next dry run will say."""
+        self.dry_run_statement_type = statement_type
+        if tables is not None:
+            self.dry_run_tables = [FakeTableRef(d, t) for d, t in tables]
+        self.dry_run_bytes = total_bytes
+        self.dry_run_error = error
+        return self
+
     def query(self, sql: str, job_config: Any = None, **kwargs) -> FakeQueryJob:
         params, raw = _flatten_params(job_config)
-        self.queries.append(RecordedQuery(sql=sql, params=params, raw_params=raw))
+        self.queries.append(
+            RecordedQuery(
+                sql=sql,
+                params=params,
+                raw_params=raw,
+                maximum_bytes_billed=getattr(job_config, "maximum_bytes_billed", None),
+                dry_run=bool(getattr(job_config, "dry_run", False)),
+            )
+        )
+
+        if getattr(job_config, "dry_run", False):
+            self.dry_runs.append(sql)
+            if self.dry_run_error is not None:
+                raise self.dry_run_error
+            return FakeQueryJob(
+                [],
+                statement_type=self.dry_run_statement_type,
+                referenced_tables=list(self.dry_run_tables),
+                total_bytes_processed=self.dry_run_bytes,
+            )
 
         normalized = " ".join(sql.split())
         for needle, error in self._errors:

@@ -111,6 +111,12 @@ class Settings:
     tasks_target_url: str = ""
     tasks_invoker_sa: str = ""
 
+    # Analytics: model-generated SQL runs as a separate read-only identity, and
+    # never scans more than the cap however creative the query.
+    analytics_service_account: str = ""
+    analytics_max_bytes: int = 100 * 1024 * 1024  # 100 MiB is generous here
+    analytics_enabled: bool = True
+
     require_signature: bool = True
 
     @property
@@ -188,6 +194,10 @@ def load_settings() -> Settings:
         firestore_prefix=_env("FIRESTORE_PREFIX"),
         receipts_bucket=_env("RECEIPTS_BUCKET"),
         gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash"),
+        analytics_service_account=_env("ANALYTICS_SERVICE_ACCOUNT"),
+        analytics_max_bytes=int(_env("ANALYTICS_MAX_BYTES", str(100 * 1024 * 1024)) or 0)
+        or 100 * 1024 * 1024,
+        analytics_enabled=_env_bool("ANALYTICS_ENABLED", True),
         task_backend=_env("TASK_BACKEND", "inline"),
         tasks_queue=_env("TASKS_QUEUE", "nano-webhook-work"),
         tasks_location=_env("TASKS_LOCATION", _env("VERTEX_LOCATION", "us-central1")),

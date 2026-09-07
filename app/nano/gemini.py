@@ -140,13 +140,36 @@ INTENT_SPECS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {}},
     },
     {
+        "name": "analytics_question",
+        "description": (
+            "A question about the household's purchase history that the fixed "
+            "query types do not cover — comparing shops, price trends over time, "
+            "where something is cheapest, which shop is used most, spending broken "
+            "down in an unusual way. Anything answerable from receipts that "
+            "query_history cannot express belongs here."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The user's question, restated clearly and in full, so it can "
+                        "be answered without the surrounding conversation."
+                    ),
+                }
+            },
+            "required": ["question"],
+        },
+    },
+    {
         "name": "cannot_answer",
         "description": (
             "The user asked for something clear and sensible that this assistant "
-            "cannot do. Use this for any reasonable request that no other function "
-            "covers — comparing prices between shops, predicting future spending, "
-            "setting reminders. Prefer this over 'help' and over 'get_list' whenever "
-            "the user genuinely asked for something."
+            "cannot do at all — setting reminders, ordering shopping, anything not "
+            "answerable from logged receipts. A question ABOUT past purchases is "
+            "not this; use analytics_question for those. Prefer this over 'help' "
+            "and over 'get_list' whenever the user genuinely asked for something."
         ),
         "parameters": {
             "type": "object",
