@@ -37,8 +37,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/healthz")
-def healthz() -> dict[str, str]:
+# NOT "/healthz". Google's frontend intercepts that exact path on *.run.app
+# and answers it with its own HTML 404, so the request never reaches the
+# container. Verified against the deployed service: "/healthz" returns Google's
+# error page while "/healthzz", "/health", "/readyz" and "/livez" all reach
+# FastAPI normally.
+@router.get("/health")
+def health() -> dict[str, str]:
     """Liveness only — deliberately makes no external calls."""
     return {"status": "ok"}
 

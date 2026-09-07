@@ -42,10 +42,27 @@ def post(client: TestClient, payload: dict, app_secret: str, headers: dict | Non
 
 
 class TestHealth:
-    def test_healthz_makes_no_external_calls(self, client: TestClient):
-        response = client.get("/healthz")
+    def test_health_makes_no_external_calls(self, client: TestClient):
+        response = client.get("/health")
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+    def test_health_is_not_served_from_the_reserved_healthz_path(self, client: TestClient):
+        """Google's frontend intercepts /healthz on *.run.app.
+
+        A deploy's post-deploy check failed against the live service because
+        Google answered /healthz with its own HTML 404 before the request
+        reached the container, even though FastAPI had the route registered and
+        advertised it in /openapi.json. Every other path reached the app.
+        """
+        from nano.routes import router
+
+        paths = {route.path for route in router.routes}
+        assert "/health" in paths
+        assert "/healthz" not in paths, (
+            "/healthz is intercepted by Google's frontend on Cloud Run and never "
+            "reaches the container; use /health"
+        )
 
 
 class TestVerificationHandshake:
