@@ -286,8 +286,16 @@ def record_turn(
     intent: str,
     settings: Settings | None = None,
     reply: str = "",
+    topic: str = "",
+    by: str = "",
 ) -> None:
-    """Append an exchange, keeping only the most recent MEMORY_TURNS."""
+    """Append an exchange to one person's memory.
+
+    `reply` is stored because the next message often refers to it — "the list"
+    after Nano has printed a list of purchases means that list. `topic` records
+    the subject the exchange left the conversation on, so a bare referent has
+    something to bind to.
+    """
     settings = settings or get_settings()
     conversation = get_conversation(sender, settings)
     turns = list(conversation.get("turns") or [])
@@ -295,12 +303,43 @@ def record_turn(
         {
             "text": text[:400],
             "intent": intent,
-            "reply": reply[:200],
+            "reply": reply[:400],
+            "by": by,
             "at": _now(),
         }
     )
     conversation["turns"] = turns[-MEMORY_TURNS:]
+    if topic:
+        conversation["last_topic"] = topic
     _save_conversation(sender, conversation, settings)
+
+
+def record_shared_turn(
+    text: str,
+    intent: str,
+    reply: str,
+    actor: str,
+    settings: Settings | None = None,
+    topic: str = "",
+) -> None:
+    """Record an exchange in every household member's memory.
+
+    Only for changes that were broadcast to both phones. Both people saw the
+    message arrive, so "remove that" should resolve against it whichever of them
+    says it — memory should match what each person can actually see.
+
+    Answers to questions deliberately do not come through here: they go only to
+    whoever asked, so the other person never saw them and must not be able to
+    refer back to something invisible to them.
+    """
+    settings = settings or get_settings()
+    for number in settings.household_numbers:
+        record_turn(number, text, intent, settings, reply, topic=topic, by=actor)
+
+
+def last_topic(sender: str, settings: Settings | None = None) -> str:
+    settings = settings or get_settings()
+    return str(get_conversation(sender, settings).get("last_topic") or "")
 
 
 def record_action(

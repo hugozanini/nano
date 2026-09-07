@@ -28,6 +28,8 @@ from nano.logging_setup import log_with
 
 logger = logging.getLogger(__name__)
 
+MEMORY_TURNS_SHOWN = 6
+
 SYSTEM_PROMPT = (
     "You are Nano, a grocery list assistant for a couple. "
     "Classify the user's message into exactly one of the available functions.\n"
@@ -35,6 +37,11 @@ SYSTEM_PROMPT = (
     "to resolve short follow-ups and corrections. 'no, the decaf one' after adding "
     "coffee means remove_items ['coffee'] and add_items ['decaf coffee']; 'remove "
     "that' refers to whatever was just added; 'undo' reverses the last change.\n"
+    "A bare reference — 'the list', 'it', 'them', 'that' — refers to whatever was "
+    "last discussed, NOT to whichever function the word usually matches. If Nano "
+    "has just shown the items from a shopping trip, then 'the list' means those "
+    "items and 'show me the list again' is query_history/items_in_last_purchase, "
+    "not get_list. Read the last subject and the previous reply before deciding.\n"
     "Choosing between the fallbacks matters:\n"
     "- call help ONLY when the user explicitly asks what you can do;\n"
     "- call cannot_answer when they asked for something clear and reasonable that "
@@ -109,8 +116,14 @@ INTENT_SPECS: list[dict[str, Any]] = [
     {
         "name": "get_list",
         "description": (
-            "Return the current items on the shared shopping list. Use this when the "
-            "user asks what is on the list."
+            "Show the shared shopping list — the things still to be bought. Use this "
+            "when the user asks what is on the shopping list, or what they need to "
+            "buy.\n"
+            "Do NOT use this for a bare reference such as 'the list' when the "
+            "conversation was last about something else: after Nano has shown what "
+            "was purchased, 'the list' means those purchased items, and the right "
+            "function is query_history with items_in_last_purchase. Check the last "
+            "subject given in the context before choosing this."
         ),
         "parameters": {"type": "object", "properties": {}},
     },
@@ -332,28 +345,97 @@ def _first_part(response: Any):
     return parts[0] if parts else None
 
 
-def build_context(turns: list[dict[str, Any]] | None, current_items: list[str] | None) -> str:
-    """Render recent exchanges and list state for the classification prompt.
+# What a reply is summarised down to in the prompt. Enough to identify the
+# subject, short enough that six turns stay cheap.
+REPLY_EXCERPT = 180
 
-    Without this every message is classified in isolation, so "no, the decaf
-    one" and "remove that" have nothing to refer back to.
+TOPIC_DESCRIPTIONS = {
+    "purchases": "what was bought on a recent shopping trip",
+    "shopping_list": "the shared shopping list",
+    "spending": "spending totals",
+    "backlog": "feature requests",
+}
+
+# Which subject each intent leaves the conversation on. A bare referent like
+# "the list" binds to this when nothing else disambiguates it.
+INTENT_TOPICS = {
+    "add_items": "shopping_list",
+    "remove_items": "shopping_list",
+    "get_list": "shopping_list",
+    "close_list": "shopping_list",
+    "undo": "shopping_list",
+    "log_receipt": "purchases",
+    "analytics_question": "spending",
+    "list_requests": "backlog",
+}
+
+QUERY_TYPE_TOPICS = {
+    "items_in_last_purchase": "purchases",
+    "last_purchase": "purchases",
+    "total_spend": "spending",
+    "spend_by_item": "spending",
+}
+
+
+def topic_for(intent: str, query_type: str = "") -> str:
+    """The subject a completed exchange leaves the conversation on."""
+    if intent == "query_history" and query_type:
+        return QUERY_TYPE_TOPICS.get(query_type, "spending")
+    return INTENT_TOPICS.get(intent, "")
+
+
+def build_context(
+    turns: list[dict[str, Any]] | None,
+    current_items: list[str] | None,
+    last_topic: str = "",
+    viewer: str = "",
+) -> str:
+    """Render the conversation so far for the classification prompt.
+
+    Includes what Nano *replied*, not only what was asked. That omission caused a
+    real failure: after Nano listed twelve purchased items, "give me the list in
+    English" was classified as the shopping list, because the prompt recorded
+    only `they said "what did I purchase last time?" -> query_history` and gave
+    the model no idea a list of purchases had just been printed. The reply was
+    being stored and thrown away.
+
+    Turns from the other household member are included when they were broadcast
+    to both phones, and are labelled by name — both people saw those messages
+    arrive, so "remove that" should resolve against them.
     """
     sections = []
 
     if current_items:
-        sections.append("Current list: " + ", ".join(current_items))
+        sections.append("Current shopping list: " + ", ".join(current_items))
     else:
-        sections.append("Current list: (empty)")
+        sections.append("Current shopping list: (empty)")
+
+    if last_topic:
+        described = TOPIC_DESCRIPTIONS.get(last_topic, last_topic)
+        sections.append(
+            f"Last subject discussed: {described}. A bare reference such as "
+            f'"the list", "it" or "them" most likely means this.'
+        )
 
     if turns:
         lines = []
-        for turn in turns[-6:]:
+        for turn in turns[-MEMORY_TURNS_SHOWN:]:
             said = str(turn.get("text", "")).strip()
-            intent = str(turn.get("intent", "")).strip()
-            if said:
-                lines.append(f'- they said "{said}" -> {intent or "unknown"}')
+            if not said:
+                continue
+            intent = str(turn.get("intent", "")).strip() or "unknown"
+            actor = str(turn.get("by", "")).strip()
+            who = "you" if not actor or actor == viewer else actor
+            lines.append(f'- {who} said: "{said}"   ({intent})')
+
+            reply = str(turn.get("reply", "")).strip().replace("\n", " ")
+            if reply:
+                excerpt = reply[:REPLY_EXCERPT]
+                if len(reply) > REPLY_EXCERPT:
+                    excerpt += "…"
+                lines.append(f'  Nano replied: "{excerpt}"')
         if lines:
-            sections.append("Recent messages:\n" + "\n".join(lines))
+            sections.append("Recent exchanges, oldest first:\n" + "\n".join(lines))
 
     return "\n\n".join(sections)
 
@@ -363,10 +445,12 @@ def classify_message(
     model: Any = None,
     turns: list[dict[str, Any]] | None = None,
     current_items: list[str] | None = None,
+    last_topic: str = "",
+    viewer: str = "",
 ) -> tuple[str, dict[str, Any]]:
     """Classify a message into (intent, arguments). Falls back to get_list."""
     model = model or classifier_model()
-    context = build_context(turns, current_items)
+    context = build_context(turns, current_items, last_topic, viewer)
     try:
         chat = model.start_chat()
         response = chat.send_message(f"{SYSTEM_PROMPT}\n\n{context}\n\nMessage: {text}")
