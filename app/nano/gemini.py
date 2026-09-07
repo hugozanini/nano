@@ -104,11 +104,18 @@ def _function_declarations():
                 "properties": {
                     "query_type": {
                         "type": "string",
-                        "enum": ["total_spend", "last_purchase", "spend_by_item"],
+                        "enum": [
+                            "total_spend",
+                            "last_purchase",
+                            "spend_by_item",
+                            "items_in_last_purchase",
+                        ],
                         "description": (
                             "total_spend: how much was spent in a time period. "
                             "last_purchase: when a specific item was last bought. "
-                            "spend_by_item: total ever spent on a specific item."
+                            "spend_by_item: total ever spent on a specific item. "
+                            "items_in_last_purchase: what was bought on the most "
+                            "recent shopping trip, e.g. 'what did we buy?'."
                         ),
                     },
                     "period": {
