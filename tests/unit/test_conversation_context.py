@@ -195,14 +195,26 @@ class TestSharedMemoryForBroadcasts:
         assert 'you said: "add coffee"' in context
 
 
-class TestTheDescriptionsResolveBareReferences:
-    """Context alone did not fix the screenshot; the descriptions had to change too.
+class TestTheInstructionsResolveBareReferences:
+    """Context alone did not fix the screenshot. An explicit instruction did.
 
-    Verified against the real model: with the reply and the subject both in the
-    prompt, "Give me the list in English" still routed to `get_list`, because
-    that description said "asks what is on the list" and the word `list` was a
-    stronger signal than the conversation. The rule is now stated in both the
-    system prompt and the description that was winning.
+    Measured against the real model, ten trials each, on "Give me the list in
+    English" after a purchase answer:
+
+        richer context, no instruction change     0/10
+        get_list description only                10/10
+        system prompt rule only                  10/10
+        both, as shipped                         10/10
+
+    So context loses to a standing instruction — `get_list` saying "asks what is
+    on the list" outweighed a paragraph of conversation — and either instruction
+    alone is enough. Both are kept: a function description and a general
+    principle drift differently as models change, and carrying both costs two
+    sentences.
+
+    These assert the instructions are still stated. Whether they still *work* is
+    `tests/integration/test_classification_real.py`, which is the only tier that
+    can tell.
     """
 
     def test_the_system_prompt_binds_bare_references_to_the_subject(self):
