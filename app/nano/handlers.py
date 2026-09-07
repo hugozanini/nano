@@ -249,6 +249,24 @@ def _apply_intent(
         _reply(message.sender, HELP_REPLY, settings)
         return HELP_REPLY
 
+    if intent == "cannot_answer":
+        reply = _cannot_answer_reply(str(args.get("request") or ""))
+        _reply(message.sender, reply, settings)
+        return reply
+
+    if intent == "request_feature":
+        reply = _feature_request_reply(str(args.get("request") or ""))
+        _reply(message.sender, reply, settings)
+        return reply
+
+    if intent == "unclear":
+        reply = (
+            "Sorry, I didn't follow that. You can add things to the list, send me a "
+            "receipt photo, or ask about past spending."
+        )
+        _reply(message.sender, reply, settings)
+        return reply
+
     if intent == "query_history":
         raw_item = args.get("item_name")
         item = canonicalise.canonicalise_query(raw_item) if raw_item else None
@@ -265,6 +283,47 @@ def _apply_intent(
     reply = format_list(current)
     _reply(message.sender, reply, settings)
     return reply
+
+
+def _describe(request: str) -> str:
+    """Tidy the model's phrasing for use mid-sentence.
+
+    Deliberately minimal. An earlier version stripped leading verbs like "know"
+    and "find out" to fit the template "I can't {x} yet" — which removed the
+    very word that made the sentence grammatical and produced "I can't the main
+    place we do groceries yet". The template was the problem, not the phrasing,
+    so the template now accepts any phrase and this only trims punctuation.
+    """
+    return (request or "").strip().rstrip(".?!,;")
+
+
+def _cannot_answer_reply(request: str) -> str:
+    """Say what cannot be done, about the thing that was actually asked.
+
+    The failure this replaces: a real question was answered with a list of
+    capabilities, which does not even acknowledge what was asked. Naming the
+    request back is the difference between a brush-off and an answer.
+    """
+    described = _describe(request)
+    if described:
+        # "you're asking about X" accepts whatever phrasing the model returns —
+        # noun phrase, question fragment, or a verb-led one if it slips — and
+        # stays grammatical. The previous template was "I can't {X} yet", which
+        # needed X to be a verb phrase and produced "I can't the main place we
+        # do groceries yet".
+        return (
+            f"I can't work that out yet — you're asking about {described}, and that's "
+            "beyond what I can get from the receipts I've logged so far. I've noted it "
+            "as a feature request, so it can be added later."
+        )
+    return "I can't do that yet, but I've noted it as a feature request so it can be added later."
+
+
+def _feature_request_reply(request: str) -> str:
+    described = _describe(request)
+    if described:
+        return f'Noted — I\'ve added "{described}" to the backlog as a feature request.'
+    return "Noted — I've added that to the backlog as a feature request."
 
 
 def _undo(sender: str, sender_name: str, message_id: str, settings: Settings) -> str:

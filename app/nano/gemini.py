@@ -35,9 +35,13 @@ SYSTEM_PROMPT = (
     "to resolve short follow-ups and corrections. 'no, the decaf one' after adding "
     "coffee means remove_items ['coffee'] and add_items ['decaf coffee']; 'remove "
     "that' refers to whatever was just added; 'undo' reverses the last change.\n"
-    "If the message is a greeting, a question about your abilities, or makes no "
-    "sense as a grocery request, call help. If it is a request to see the list, "
-    "call get_list."
+    "Choosing between the fallbacks matters:\n"
+    "- call help ONLY when the user explicitly asks what you can do;\n"
+    "- call cannot_answer when they asked for something clear and reasonable that "
+    "no other function covers, and capture what they wanted;\n"
+    "- call unclear only when the message has no discernible intent at all.\n"
+    "Never answer a real question by listing your capabilities. If they asked for "
+    "the list, call get_list."
 )
 
 RECEIPT_PROMPT = """Extract structured data from this receipt image. Return ONLY valid JSON, no markdown fences, no explanation, matching exactly this shape:
@@ -66,109 +70,174 @@ Two rules matter more than the rest:
 Make your best reasonable estimate for any other field that is not clearly visible rather than omitting it."""
 
 
+# The intent set, as data rather than buried in SDK constructor calls.
+#
+# These descriptions are the entire specification of Nano's conversational
+# behaviour — the model follows them literally, so a careless word changes the
+# product. One did. `help` was documented as covering "a message that makes no
+# sense as a grocery request", which quietly made it the catch-all, and a
+# perfectly reasonable question about which shop we use most was answered with a
+# capability brochure instead.
+#
+# Keeping them as data means they can be reviewed in one place and asserted on in
+# tests, without reaching into a deprecated SDK's internals.
+INTENT_SPECS: list[dict[str, Any]] = [
+    {
+        "name": "add_items",
+        "description": "Add one or more grocery items to the shared shopping list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Grocery items to add, e.g. ['coffee', 'tomatoes']",
+                }
+            },
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "remove_items",
+        "description": "Remove one or more items from the shared shopping list.",
+        "parameters": {
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "get_list",
+        "description": (
+            "Return the current items on the shared shopping list. Use this when the "
+            "user asks what is on the list."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "close_list",
+        "description": (
+            "Clear the entire shopping list, typically said right after a shopping "
+            "trip is finished."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "undo",
+        "description": (
+            "Reverse the most recent change to the list, for messages like 'undo', "
+            "'no wait', 'put that back' or 'I didn't mean that'."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "help",
+        "description": (
+            "List what this assistant can do. ONLY for an explicit request for help, "
+            "such as 'help', 'what can you do', 'how do you work'. Never use this as "
+            "a fallback for a message you cannot otherwise place."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cannot_answer",
+        "description": (
+            "The user asked for something clear and sensible that this assistant "
+            "cannot do. Use this for any reasonable request that no other function "
+            "covers — comparing prices between shops, predicting future spending, "
+            "setting reminders. Prefer this over 'help' and over 'get_list' whenever "
+            "the user genuinely asked for something."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What the user wanted to know, as a short noun phrase in "
+                        "their own terms, e.g. 'which shop is cheapest for milk' or "
+                        "'whether milk prices are rising'. It is quoted back to them "
+                        "as 'you're asking about ...', so it must read naturally "
+                        "there. Do not begin it with a verb like 'know' or 'find'."
+                    ),
+                }
+            },
+            "required": ["request"],
+        },
+    },
+    {
+        "name": "request_feature",
+        "description": (
+            "The user explicitly asked for a new capability to be added, e.g. 'can "
+            "you add support for X', 'it would be great if you could Y'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "The capability being asked for, in one short phrase.",
+                }
+            },
+            "required": ["request"],
+        },
+    },
+    {
+        "name": "unclear",
+        "description": (
+            "The message cannot be understood at all — a typo, a fragment, or "
+            "something with no discernible intent. Use this only when there is no "
+            "sensible request to act on; if the user clearly asked for something this "
+            "assistant cannot do, use 'cannot_answer' instead."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "query_history",
+        "description": (
+            "Answer a question about past purchases or spending history, based on logged receipts."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_type": {
+                    "type": "string",
+                    "enum": [
+                        "total_spend",
+                        "last_purchase",
+                        "spend_by_item",
+                        "items_in_last_purchase",
+                    ],
+                    "description": (
+                        "total_spend: how much was spent in a time period. "
+                        "last_purchase: when a specific item was last bought. "
+                        "spend_by_item: total ever spent on a specific item. "
+                        "items_in_last_purchase: what was bought on the most recent "
+                        "shopping trip, e.g. 'what did we buy?'."
+                    ),
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["today", "this_week", "this_month", "last_month", "all_time"],
+                    "description": (
+                        "Time period, only relevant for total_spend. Defaults to this_month."
+                    ),
+                },
+                "item_name": {
+                    "type": "string",
+                    "description": "Required for last_purchase and spend_by_item.",
+                },
+            },
+            "required": ["query_type"],
+        },
+    },
+]
+
+
 def _function_declarations():
     from vertexai.generative_models import FunctionDeclaration
 
-    return [
-        FunctionDeclaration(
-            name="add_items",
-            description="Add one or more grocery items to the shared shopping list.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Grocery items to add, e.g. ['coffee', 'tomatoes']",
-                    }
-                },
-                "required": ["items"],
-            },
-        ),
-        FunctionDeclaration(
-            name="remove_items",
-            description="Remove one or more items from the shared shopping list.",
-            parameters={
-                "type": "object",
-                "properties": {"items": {"type": "array", "items": {"type": "string"}}},
-                "required": ["items"],
-            },
-        ),
-        FunctionDeclaration(
-            name="get_list",
-            description=(
-                "Return the current items on the shared shopping list. Use this for "
-                "anything unrelated to adding, removing, closing the list, or asking "
-                "about past purchases/spending."
-            ),
-            parameters={"type": "object", "properties": {}},
-        ),
-        FunctionDeclaration(
-            name="close_list",
-            description=(
-                "Clear the entire shopping list, typically said right after a shopping "
-                "trip is finished."
-            ),
-            parameters={"type": "object", "properties": {}},
-        ),
-        FunctionDeclaration(
-            name="undo",
-            description=(
-                "Reverse the most recent change to the list, for messages like "
-                "'undo', 'no wait', 'put that back' or 'I didn't mean that'."
-            ),
-            parameters={"type": "object", "properties": {}},
-        ),
-        FunctionDeclaration(
-            name="help",
-            description=(
-                "Explain what this assistant can do. Use for greetings, 'help', "
-                "'what can you do', or a message that makes no sense as a "
-                "grocery request."
-            ),
-            parameters={"type": "object", "properties": {}},
-        ),
-        FunctionDeclaration(
-            name="query_history",
-            description=(
-                "Answer a question about past purchases or spending history, based on "
-                "logged receipts."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query_type": {
-                        "type": "string",
-                        "enum": [
-                            "total_spend",
-                            "last_purchase",
-                            "spend_by_item",
-                            "items_in_last_purchase",
-                        ],
-                        "description": (
-                            "total_spend: how much was spent in a time period. "
-                            "last_purchase: when a specific item was last bought. "
-                            "spend_by_item: total ever spent on a specific item. "
-                            "items_in_last_purchase: what was bought on the most "
-                            "recent shopping trip, e.g. 'what did we buy?'."
-                        ),
-                    },
-                    "period": {
-                        "type": "string",
-                        "enum": ["today", "this_week", "this_month", "last_month", "all_time"],
-                        "description": (
-                            "Time period, only relevant for total_spend. Defaults to this_month."
-                        ),
-                    },
-                    "item_name": {
-                        "type": "string",
-                        "description": "Required for last_purchase and spend_by_item.",
-                    },
-                },
-                "required": ["query_type"],
-            },
-        ),
-    ]
+    return [FunctionDeclaration(**spec) for spec in INTENT_SPECS]
 
 
 def _deterministic_config():
