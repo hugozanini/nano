@@ -131,6 +131,10 @@ def parse_inbound(payload: dict[str, Any]) -> InboundMessage | None:
         media = message.get(msg_type) or {}
         media_id = media.get("id", "")
         mime_type = media.get("mime_type", "image/jpeg")
+        # A photo sent with a caption carries the text here, not in `text`.
+        # Dropping it means "what did we buy?" attached to a receipt is
+        # silently ignored and the person has to ask again.
+        text = media.get("caption", "") or ""
 
     return InboundMessage(
         id=message_id,

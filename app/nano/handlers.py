@@ -115,6 +115,11 @@ def handle_message(message: InboundMessage, settings: Settings | None = None) ->
 
     if message.is_image:
         _handle_receipt(message, settings)
+        # A photo can carry a caption. Answer it once the receipt is in, so
+        # "what did we buy?" attached to a receipt works in one message.
+        if message.text.strip():
+            log_with(logger, logging.INFO, "handling the caption on an image")
+            _handle_text(message, settings)
         return "log_receipt"
 
     if not message.is_text:
@@ -273,8 +278,12 @@ def _undo(sender: str, sender_name: str, message_id: str, settings: Settings) ->
     return f"Undone — reversed {verb}. {format_list(previous)}"
 
 
+FORCE_PHRASES = {"log it anyway", "log anyway", "yes log it", "different trip"}
+
+
 def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
     sender_name = settings.name_for(message.sender)
+    force = message.text.strip().lower() in FORCE_PHRASES
 
     try:
         image_bytes, mime_type = whatsapp.download_media(message.media_id, settings)
@@ -301,6 +310,29 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
     for item, canon in zip(items, mapped, strict=False):
         item["normalized_name"] = canon["canonical"]
         item["category"] = canon["category"]
+
+    # A person re-photographing the same receipt is a different message, so
+    # message-id idempotency does not catch it, and the spend silently doubles.
+    already = purchases.find_matching_purchase(
+        store_name, purchased_on.isoformat(), extracted.get("total_amount", 0), settings
+    )
+    if already and not force and already != purchases.purchase_id_for(message.id):
+        total = extracted.get("total_amount", 0)
+        _reply(
+            message.sender,
+            f"I've already logged a receipt from {store_name} on {purchased_on:%-d %b} "
+            f"for {currency} {total}, so I haven't logged this one again — it would "
+            f"have doubled your total. Send it with the caption 'log it anyway' if "
+            f"this really was a separate trip.",
+            settings,
+        )
+        log_with(
+            logger,
+            logging.INFO,
+            "skipped a receipt matching an existing purchase",
+            existing=already,
+        )
+        return
 
     purchase_id = purchases.purchase_id_for(message.id)
     receipt_uri = receipts.archive_receipt(

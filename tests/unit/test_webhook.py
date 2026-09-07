@@ -287,3 +287,95 @@ class TestReplyRouting:
         fake_gemini.queue_function_call("get_list")
         post(client, text_message("what's on the list?"), app_secret)
         assert fake_whatsapp.recipients == [MEMBER_PRIMARY]
+
+
+class TestImageCaptions:
+    """Regression: a caption on a receipt photo was silently dropped.
+
+    WhatsApp puts it at `message["image"]["caption"]`, not in `text`, so
+    sending a receipt with "what did we buy?" attached logged the receipt and
+    ignored the question entirely — the person had to ask again.
+    """
+
+    def test_a_caption_is_parsed_off_an_image(self):
+        from nano.whatsapp import parse_inbound
+
+        payload = image_message()
+        payload["entry"][0]["changes"][0]["value"]["messages"][0]["image"]["caption"] = (
+            "What did we buy?"
+        )
+        parsed = parse_inbound(payload)
+        assert parsed.is_image
+        assert parsed.text == "What did we buy?"
+
+    def test_an_image_without_a_caption_has_empty_text(self):
+        from nano.whatsapp import parse_inbound
+
+        assert parse_inbound(image_message()).text == ""
+
+    def test_a_captioned_receipt_is_logged_and_the_caption_answered(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        fake_gemini.queue_json(receipt.as_dict())  # extraction
+        fake_gemini.queue_json(  # canonicalisation
+            [{"canonical": "milk", "category": "dairy"} for _ in receipt.items]
+        )
+        fake_gemini.queue_function_call("query_history", query_type="items_in_last_purchase")
+
+        payload = image_message(message_id="wamid.CAPTIONED")
+        payload["entry"][0]["changes"][0]["value"]["messages"][0]["image"]["caption"] = (
+            "What did we buy?"
+        )
+        response = post(client, payload, app_secret)
+
+        assert response.status_code == 200
+        texts = " ".join(fake_whatsapp.texts)
+        assert "Logged your receipt" in texts, "the receipt should still be logged"
+        assert len(fake_whatsapp.texts) > 1, "the caption should also get an answer"
+
+
+class TestDuplicateReceiptDetection:
+    """Re-photographing the same receipt is a different message, so message-id
+    idempotency cannot catch it — and the recorded spend silently doubles.
+    One EUR 43.06 shop became EUR 86.12 in production this way."""
+
+    def _script(self, fake_gemini, receipt):
+        fake_gemini.queue_json(receipt.as_dict())
+        fake_gemini.queue_json([{"canonical": "milk", "category": "dairy"} for _ in receipt.items])
+
+    def test_a_matching_purchase_blocks_a_second_write(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        self._script(fake_gemini, receipt)
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [{"purchase_id": "older"}])
+
+        post(client, image_message(message_id="wamid.RESENT"), app_secret)
+
+        assert fake_bq.count_matching("INSERT INTO `nano_test.purchases`") == 0
+        assert any("already logged a receipt" in t for t in fake_whatsapp.texts)
+        assert any("doubled your total" in t for t in fake_whatsapp.texts)
+
+    def test_a_new_receipt_is_logged_normally(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        self._script(fake_gemini, receipt)
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [])
+
+        post(client, image_message(message_id="wamid.NEW"), app_secret)
+
+        assert fake_bq.count_matching("INSERT INTO `nano_test.purchases`") == 1
+
+    def test_an_explicit_caption_overrides_the_check(
+        self, client: TestClient, app_secret: str, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        """Two identical shops on one day is unusual but possible."""
+        self._script(fake_gemini, receipt)
+        fake_bq.when("SELECT purchase_id FROM `nano_test.purchases`", [{"purchase_id": "older"}])
+
+        payload = image_message(message_id="wamid.FORCED")
+        payload["entry"][0]["changes"][0]["value"]["messages"][0]["image"]["caption"] = (
+            "log it anyway"
+        )
+        post(client, payload, app_secret)
+
+        assert fake_bq.count_matching("INSERT INTO `nano_test.purchases`") == 1
