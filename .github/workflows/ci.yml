@@ -76,17 +76,26 @@ jobs:
     needs: lint-and-test
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The path filter compares against the base, which needs shared
+          # history. The default shallow clone has none, and the first version
+          # of this job failed the diff, matched nothing, and reported success
+          # having run no tests at all.
+          fetch-depth: 0
 
       - name: Did this change how anything is classified?
         id: changed
         run: |
-          git fetch --depth=1 origin "${{ github.base_ref || github.event.before }}" 2>/dev/null || true
-          base=$(git rev-parse FETCH_HEAD 2>/dev/null || echo "")
-          if [ -z "$base" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"   # cannot tell, so check
+          base="${{ github.base_ref && format('origin/{0}', github.base_ref) || github.event.before }}"
+          # Every uncertain path leads to running the tests. A filter that
+          # cannot tell must not be the reason a guard goes quiet.
+          if ! changed=$(git diff --name-only "$base"...HEAD 2>/dev/null); then
+            echo "cannot diff against '$base' — running the tests"
+            echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git diff --name-only "$base"...HEAD | grep -qE '^app/nano/(gemini|handlers|analytics)\.py$'; then
+          echo "$changed"
+          if echo "$changed" | grep -qE '^app/nano/(gemini|handlers|analytics)\.py$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -119,6 +128,10 @@ jobs:
           BQ_DATASET: nano_test
           FIRESTORE_PREFIX: nano_test_
         run: .venv/bin/python -m pytest tests/integration/test_classification_real.py -q
+
+      - name: Say so when nothing ran
+        if: steps.changed.outputs.run != 'true'
+        run: echo "::notice::No classification file changed — routing tests skipped."
 
   integration:
     name: Integration tests (nano_test)
