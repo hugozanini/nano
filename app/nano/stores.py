@@ -63,7 +63,7 @@ class Store:
 
 
 def normalise_brand(store_name: str) -> str:
-    """`MERCADONA, S.A.` -> `Mercadona`.
+    """`SUPERMERCAT EXEMPLE, S.L.` -> `Supermercat Exemple`.
 
     Deterministic on purpose: brand normalisation decides identity, so it must
     not vary between runs or depend on a model being reachable.
