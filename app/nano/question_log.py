@@ -33,8 +33,12 @@ TEMPLATE = "template"
 GENERATED_SQL = "generated_sql"
 UNANSWERABLE = "unanswerable"
 FAILED = "failed"
+# Asked back rather than answered. Recorded so a chronically ambiguous phrasing
+# shows up in v_question_patterns the same way an unserved question does — and
+# one that always resolves the same way is a candidate for becoming the default.
+CLARIFIED = "clarified"
 
-RESOLUTIONS = {TEMPLATE, GENERATED_SQL, UNANSWERABLE, FAILED}
+RESOLUTIONS = {TEMPLATE, GENERATED_SQL, UNANSWERABLE, FAILED, CLARIFIED}
 
 # Words that carry no meaning for grouping questions. Kept small on purpose:
 # over-stripping merges genuinely different questions, which is worse than

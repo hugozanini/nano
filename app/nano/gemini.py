@@ -88,6 +88,32 @@ Make your best reasonable estimate for any other field that is not clearly visib
 #
 # Keeping them as data means they can be reviewed in one place and asserted on in
 # tests, without reaching into a deprecated SDK's internals.
+
+# The readings a loose message can land on. A closed set on purpose: the model
+# says only which two collide, and the sentence is written here. That is the
+# same division that makes `cannot_answer` grammatical for any phrasing —
+# nouns from the model, grammar from code.
+READINGS: dict[str, dict[str, str]] = {
+    "shopping_list": {
+        "label": "your shopping list",
+        "pick": "shopping list",
+        "intent": "get_list",
+        "query_type": "",
+    },
+    "last_purchase": {
+        "label": "what you bought last time",
+        "pick": "last purchase",
+        "intent": "query_history",
+        "query_type": "items_in_last_purchase",
+    },
+    "spending": {
+        "label": "how much you have spent",
+        "pick": "spending",
+        "intent": "query_history",
+        "query_type": "total_spend",
+    },
+}
+
 INTENT_SPECS: list[dict[str, Any]] = [
     {
         "name": "add_items",
@@ -114,6 +140,35 @@ INTENT_SPECS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "clarify",
+        "description": (
+            "Ask the user which of two readings they meant, and answer nothing yet.\n"
+            "Use this ONLY when BOTH are true: two readings are genuinely plausible for "
+            "this message, AND they would give materially different answers. A wrong "
+            "answer to a clear question is bad, but asking about a clear question is "
+            "worse — it happens on every message rather than the rare one.\n"
+            "Do NOT use this when the context already settles it. If the last subject "
+            "was purchases and the user says 'the list', that is resolved: answer it. "
+            "If one reading is merely likelier, answer that one and set `assumed` "
+            "instead of asking. Never use this for 'add coffee', 'what's on the "
+            "shopping list?' or any message with one sensible meaning."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(READINGS)},
+                    "description": (
+                        "Exactly two readings this message could have. Nano writes the "
+                        "question from these."
+                    ),
+                },
+            },
+            "required": ["options"],
+        },
+    },
+    {
         "name": "get_list",
         "description": (
             "Show the shared shopping list — the things still to be bought. Use this "
@@ -125,7 +180,21 @@ INTENT_SPECS: list[dict[str, Any]] = [
             "function is query_history with items_in_last_purchase. Check the last "
             "subject given in the context before choosing this."
         ),
-        "parameters": {"type": "object", "properties": {}},
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "assumed": {
+                    "type": "string",
+                    "enum": sorted(READINGS),
+                    "description": (
+                        "Set ONLY if the message was loose and you picked a reading. "
+                        "Nano appends a one-line note offering the other one. Leave it "
+                        "unset when the message was clear — an unnecessary note reads "
+                        "as second-guessing."
+                    ),
+                },
+            },
+        },
     },
     {
         "name": "close_list",
@@ -266,6 +335,14 @@ INTENT_SPECS: list[dict[str, Any]] = [
                     "enum": ["today", "this_week", "this_month", "last_month", "all_time"],
                     "description": (
                         "Time period, only relevant for total_spend. Defaults to this_month."
+                    ),
+                },
+                "assumed": {
+                    "type": "string",
+                    "enum": sorted(READINGS),
+                    "description": (
+                        "Set ONLY if the message was loose and you picked a reading. "
+                        "Leave unset when the message was clear."
                     ),
                 },
                 "item_name": {

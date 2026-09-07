@@ -150,7 +150,7 @@ class TestCloseListConfirmation:
         """Answering 'yes' twenty minutes later almost certainly means something else."""
         import datetime
 
-        store.set_pending(MEMBER_PRIMARY, "close_list", ["coffee"], settings)
+        store.set_pending(MEMBER_PRIMARY, "close_list", {"items": ["coffee"]}, settings)
         conversation = store.get_conversation(MEMBER_PRIMARY, settings)
         conversation["pending"]["at"] = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
             hours=2
@@ -160,7 +160,7 @@ class TestCloseListConfirmation:
         assert store.take_pending(MEMBER_PRIMARY, settings) is None
 
     def test_a_pending_confirmation_is_consumed_once(self, wired_store, settings):
-        store.set_pending(MEMBER_PRIMARY, "close_list", ["coffee"], settings)
+        store.set_pending(MEMBER_PRIMARY, "close_list", {"items": ["coffee"]}, settings)
         assert store.take_pending(MEMBER_PRIMARY, settings) is not None
         assert store.take_pending(MEMBER_PRIMARY, settings) is None
 

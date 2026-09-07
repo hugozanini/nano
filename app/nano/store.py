@@ -374,16 +374,22 @@ def take_last_action(sender: str, settings: Settings | None = None) -> dict[str,
 
 
 def set_pending(
-    sender: str, action: str, items: list[str], settings: Settings | None = None
+    sender: str, kind: str, payload: dict[str, Any] | None = None, settings: Settings | None = None
 ) -> None:
+    """Park a question Nano is waiting on an answer to.
+
+    `kind` says what sort of answer would resolve it — a close-list confirmation
+    wants yes or no, a clarification wants one of its options — and `payload`
+    carries whatever that resolution needs.
+    """
     settings = settings or get_settings()
     conversation = get_conversation(sender, settings)
-    conversation["pending"] = {"action": action, "items": items, "at": _now()}
+    conversation["pending"] = {"kind": kind, "payload": payload or {}, "at": _now()}
     _save_conversation(sender, conversation, settings)
 
 
 def take_pending(sender: str, settings: Settings | None = None) -> dict[str, Any] | None:
-    """Read and clear a pending confirmation, ignoring stale ones."""
+    """Read and clear a pending question, ignoring stale ones."""
     settings = settings or get_settings()
     conversation = get_conversation(sender, settings)
     pending = conversation.get("pending")
@@ -397,6 +403,16 @@ def take_pending(sender: str, settings: Settings | None = None) -> dict[str, Any
     if isinstance(raised_at, datetime.datetime):
         age = _now() - raised_at.replace(tzinfo=raised_at.tzinfo or datetime.UTC)
         if age > PENDING_TTL:
-            log_with(logger, logging.INFO, "ignoring a stale pending confirmation")
+            log_with(logger, logging.INFO, "ignoring a stale pending question")
             return None
+
+    if "kind" not in pending:
+        # Written by the previous close-list-only shape. A deploy can land while
+        # one of these is parked in Firestore, and dropping it would silently
+        # eat someone's "yes". Self-heals within PENDING_TTL.
+        return {
+            "kind": pending.get("action", ""),
+            "payload": {"items": pending.get("items") or []},
+            "at": raised_at,
+        }
     return pending
