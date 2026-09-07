@@ -273,3 +273,14 @@ class TestMoneyIsReportedCorrectly:
     def test_the_answer_prompt_forbids_inventing_a_currency(self):
         assert "_eur` is euros" in analytics.ANSWER_PROMPT
         assert "Never introduce a currency symbol" in analytics.ANSWER_PROMPT
+
+
+class TestAnalyticsAnswersInEnglish:
+    """Standardisation is a product rule, so the prompts carry it explicitly."""
+
+    def test_the_sql_prompt_selects_the_english_name_for_display(self):
+        assert "use `item_name_english`, never `item_name_original`" in analytics.SQL_PROMPT
+
+    def test_the_answer_prompt_requires_english(self):
+        assert "Always answer in English" in analytics.ANSWER_PROMPT
+        assert "translate it" in analytics.ANSWER_PROMPT

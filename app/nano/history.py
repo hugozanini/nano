@@ -153,9 +153,12 @@ def _last_purchase(item_name: str, settings: Settings, display: str) -> str:
 
     rows = _query(
         f"""
-        SELECT p.purchased_at, p.store_name, pi.item_name, pi.line_total, p.currency
+        SELECT p.purchased_at, pi.item_name, pi.item_name_en,
+               pi.line_total, p.currency,
+               COALESCE(NULLIF(s.store_brand, ''), p.store_name) AS store_name
         FROM `{settings.table("purchase_items")}` pi
         JOIN `{settings.table("purchases")}` p ON p.purchase_id = pi.purchase_id
+        LEFT JOIN `{settings.table("stores")}` s ON s.store_id = p.store_id
         WHERE LOWER(pi.normalized_name) LIKE @pattern
         ORDER BY p.purchased_at DESC
         LIMIT 1
@@ -168,7 +171,7 @@ def _last_purchase(item_name: str, settings: Settings, display: str) -> str:
     row = rows[0]
     return (
         f"You last bought {display} on {row.purchased_at.date():%-d %b} at {row.store_name} "
-        f"— {row.item_name}, {_money(row.line_total, row.currency)}."
+        f"— {_item_label(row)}, {_money(row.line_total, row.currency)}."
     )
 
 

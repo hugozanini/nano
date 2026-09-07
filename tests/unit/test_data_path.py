@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 from nano import events, history, receipts
@@ -488,3 +489,107 @@ class TestItemNamesAreShownInEnglish:
 
         query = wired_history.statements_matching("ORDER BY p.purchased_at DESC")[-1].sql
         assert "store_brand" in query, f"should join the store dimension {sql}"
+
+
+class TestEnglishIsAlwaysTheOutputLanguage:
+    """Standardising receipts into one language is one of Nano's purposes.
+
+    Receipts arrive in Catalan, Spanish, Portuguese or English; the answer is
+    always English. This is a product rule rather than a per-feature option, so
+    it is asserted here for every path that surfaces an item name — trusting
+    each site to remember is how `_last_purchase` kept returning `MADUIXA` long
+    after the translations were being stored.
+    """
+
+    LATEST: ClassVar[list[dict]] = [
+        {
+            "purchase_id": "p1",
+            "purchased_at": datetime.datetime(2026, 8, 29),
+            "store_name": "Supermercat Exemple",
+            "total_amount": Decimal("3.11"),
+            "currency": "EUR",
+        }
+    ]
+
+    def test_the_last_purchase_list_is_english(self, wired_history, settings):
+        wired_history.when("ORDER BY p.purchased_at DESC", self.LATEST)
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [
+                {
+                    "item_name": "MADUIXA",
+                    "item_name_en": "strawberry",
+                    "line_total": Decimal("3.11"),
+                }
+            ],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "strawberry" in answer
+
+    def test_when_did_we_last_buy_is_english(self, wired_history, settings):
+        """The path that was still returning the printed Catalan name."""
+        wired_history.when(
+            "ORDER BY p.purchased_at DESC",
+            [
+                {
+                    "purchased_at": datetime.datetime(2026, 8, 29),
+                    "store_name": "Supermercat Exemple",
+                    "item_name": "MADUIXA",
+                    "item_name_en": "strawberry",
+                    "line_total": Decimal("3.11"),
+                    "currency": "EUR",
+                }
+            ],
+        )
+        answer = history.answer_history_query(
+            "last_purchase", item_name="strawberry", settings=settings
+        )
+        assert "strawberry" in answer
+        assert "strawberry (MADUIXA)" in answer, "the printed name stays for receipt matching"
+
+    def test_the_printed_name_is_the_fallback_not_the_default(self, wired_history, settings):
+        """Rows predating the translations must still render, from the original."""
+        wired_history.when("ORDER BY p.purchased_at DESC", self.LATEST)
+        wired_history.when(
+            "ORDER BY line_total DESC",
+            [{"item_name": "MADUIXA", "item_name_en": "", "line_total": Decimal("3.11")}],
+        )
+        answer = history.answer_history_query("items_in_last_purchase", settings=settings)
+        assert "MADUIXA" in answer
+
+    def test_every_item_query_selects_the_english_column(self, wired_history, settings):
+        """A path that never selects it can never render it.
+
+        Cheaper and more durable than asserting on each rendered string: if a new
+        query forgets the column, this fails without anyone having to think of it.
+        """
+        wired_history.when("ORDER BY p.purchased_at DESC", self.LATEST)
+        wired_history.when("ORDER BY line_total DESC", [])
+        history.answer_history_query("items_in_last_purchase", settings=settings)
+        history.answer_history_query("last_purchase", item_name="milk", settings=settings)
+
+        item_queries = [
+            q for q in wired_history.queries if "purchase_items" in q.sql and "item_name" in q.sql
+        ]
+        assert item_queries, "expected queries that read item names"
+        for query in item_queries:
+            assert "item_name_en" in query.sql, (
+                f"this query shows item names but never selects the translation:\n{query.sql}"
+            )
+
+
+class TestStoreNamesAreNormalised:
+    """ "Mercadona" reads better than "MERCADONA, S.A." — and the same shop
+    should not appear under two different names in two different answers."""
+
+    def test_every_answer_that_names_a_store_joins_the_dimension(self, wired_history, settings):
+        wired_history.when("ORDER BY p.purchased_at DESC", [])
+        history.answer_history_query("items_in_last_purchase", settings=settings)
+        history.answer_history_query("last_purchase", item_name="milk", settings=settings)
+
+        store_queries = [q for q in wired_history.queries if "store_name" in q.sql]
+        assert store_queries
+        for query in store_queries:
+            assert "store_brand" in query.sql, (
+                f"this query names a store but not from the dimension:\n{query.sql}"
+            )
