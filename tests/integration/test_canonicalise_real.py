@@ -2,8 +2,8 @@
 
 The unit tests prove the plumbing: batching, fallbacks, output alignment. They
 cannot prove the premise, because the fake returns whatever the test scripts.
-The premise is that Gemini genuinely knows `MADUIXA` is a strawberry and
-`MAQUINA VENUS START3` is not food — and that is the entire justification for
+The premise is that Gemini genuinely knows `POMA GOLDEN 1KG` is an apple and
+`PILES AAA P-4` is not food — and that is the entire justification for
 choosing model-based canonicalisation over a hand-maintained synonym table.
 
 Real model output drifts between versions, so these assertions are deliberately
@@ -16,13 +16,14 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-# Real line items from a Mercadona receipt, with what a person would ask for.
+# Catalan line items in the abbreviated form receipts actually print, with the
+# English words a person would ask about.
 CATALAN_ITEMS = [
-    ("MADUIXA", {"strawberry", "strawberries"}),
-    ("PASTANAGA 500 G", {"carrot", "carrots"}),
+    ("POMA GOLDEN 1KG", {"apple", "apples"}),
+    ("ARROS RODO 1KG", {"rice"}),
     ("LLET SENCERA 1L", {"milk", "whole milk"}),
     ("OUS M-12", {"egg", "eggs"}),
-    ("CINTES DE BACON", {"bacon"}),
+    ("OUS M-12", {"bacon"}),
 ]
 
 FOOD_CATEGORIES = {"produce", "dairy", "meat", "seafood", "bakery", "pantry", "frozen", "snacks"}
@@ -42,7 +43,7 @@ def mapped(real_model):
     """One call for the whole batch, shared by every assertion below."""
     from nano import canonicalise
 
-    names = [name for name, _ in CATALAN_ITEMS] + ["MAQUINA VENUS START3"]
+    names = [name for name, _ in CATALAN_ITEMS] + ["PILES AAA P-4"]
     return names, canonicalise.canonicalise_items(names, model=real_model)
 
 
@@ -59,12 +60,12 @@ class TestRealCanonicalisation:
             f"{item!r} became {canonical!r}, which does not contain any of {acceptable}"
         )
 
-    def test_a_razor_is_not_categorised_as_food(self, mapped):
+    def test_a_batteries_is_not_categorised_as_food(self, mapped):
         """The reason `category` exists: a receipt is not all groceries."""
         names, result = mapped
-        entry = result[names.index("MAQUINA VENUS START3")]
+        entry = result[names.index("PILES AAA P-4")]
         assert entry["category"] not in FOOD_CATEGORIES, (
-            f"a razor was categorised as {entry['category']!r}"
+            f"batteries was categorised as {entry['category']!r}"
         )
 
     def test_categories_come_from_the_allowed_set(self, mapped):

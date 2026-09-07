@@ -1,23 +1,23 @@
 """Mapping receipt line items onto searchable canonical names.
 
-The problem, using real extracted data from a Mercadona receipt:
+The problem, in the shape it takes on a Catalan supermarket receipt:
 
     item_name              normalized_name          actually
-    MADUIXA                maduixa                  strawberries
-    PASTANAGA 500 G        pastanaga 500 g          carrots
-    GREC NATURAL P-6       grec natural p-6         greek yogurt
-    CINTES DE BACON        cintes de bacon          bacon
-    MAQUINA VENUS START3   maquina venus start3     a razor, not food
+    POMA GOLDEN 1KG        poma golden 1kg          apples
+    ARROS RODO 1KG         arros rodo 1kg           rice
+    IOGURT NATURAL P-4     iogurt natural p-4       yogurt
+    OUS M-12               ous m-12                 eggs
+    PILES AAA P-4          piles aaa p-4            batteries, not food
 
 `normalized_name` was only ever `lower(item_name)`, and `spend_by_item` matches
-it with `LIKE`, so "how much did we spend on strawberries?" could never match
-`maduixa`. For a household mixing Catalan, Spanish, Portuguese and English,
-string matching is hopeless — the words share no letters.
+it with `LIKE`, so "how much did we spend on apples?" could never match
+`poma golden 1kg`. For a household mixing Catalan, Spanish, Portuguese and
+English, string matching is hopeless — the words often share no letters.
 
 So each line is canonicalised to an English term plus a category, in one batched
 model call per receipt, and questions are canonicalised the same way before
 matching. The categories exist because a supermarket receipt is not all
-groceries; a razor should not appear in the food budget.
+groceries; batteries should not appear in the food budget.
 
 A deterministic fallback runs whenever the model is unavailable or returns
 something unusable, so a canonicalisation failure degrades to today's behaviour
@@ -55,7 +55,7 @@ PROMPT = """You map supermarket receipt line items to canonical English names.
 
 Receipts are printed in Catalan, Spanish, Portuguese or English, heavily abbreviated, and include pack sizes and brand names. For each input line return:
 
-- "canonical": the plain English name of the product, singular, lowercase, no brand, no pack size, no quantity. Examples: "MADUIXA" -> "strawberry", "PASTANAGA 500 G" -> "carrot", "GREC NATURAL P-6" -> "greek yogurt", "CINTES DE BACON" -> "bacon", "LLET SENCERA 1L" -> "milk".
+- "canonical": the plain English name of the product, singular, lowercase, no brand, no pack size, no quantity. Examples: "POMA GOLDEN 1KG" -> "apple", "ARROS RODO 1KG" -> "rice", "IOGURT NATURAL P-4" -> "yogurt", "OUS M-12" -> "bacon", "LLET SENCERA 1L" -> "milk".
 - "category": exactly one of {categories}.
 
 Return ONLY a JSON array, one object per input line, in the same order, each shaped:
@@ -72,7 +72,7 @@ _NOISE = re.compile(
 
 
 def strip_accents(value: str) -> str:
-    """`maduixa` and `maduíxa` must not be different products."""
+    """`dolc` and `dolç` must not be different products."""
     decomposed = unicodedata.normalize("NFKD", value)
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
