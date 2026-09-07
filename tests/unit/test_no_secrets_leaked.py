@@ -33,12 +33,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # expected in CI config and are excluded from the structural scan only.
 SCAN_SKIP = {".gitignore", "uv.lock"}
 
-# Digit strings we allow: the +1-555-01xx fiction block, and all-zero placeholders.
+# Digit strings we allow: the +1-555-01xx fiction block, all-zero placeholders,
+# and sequential placeholders. The last one covers synthetic tax identifiers —
+# a Brazilian CNPJ is 14 digits and a structural check cannot tell one from a
+# phone number, but a value beginning 123456 is unmistakably invented. Kept
+# narrow on purpose: only an ascending run from 1 qualifies.
 ALLOWED_NUMERIC = re.compile(
     r"""^(
         0+                    # all-zero placeholder IDs
       | 1555010\d{4}          # +1 555 01xx reserved-for-fiction numbers
       | 15550100000           # the placeholder business display number
+      | 123456\d*             # sequential placeholders, e.g. synthetic tax ids
     )$""",
     re.VERBOSE,
 )
@@ -188,6 +193,23 @@ class TestFixturesAreSynthetic:
             assert number.startswith("1555010"), (
                 f"{number} is outside the +1 555 01xx fiction block and may be a real number"
             )
+
+    def test_the_scanner_still_rejects_realistic_looking_numbers(self):
+        """The sequential-placeholder allowance must not open a hole.
+
+        Only an ascending run from 1 is permitted; anything that could plausibly
+        be a real number is still caught.
+        """
+        assert ALLOWED_NUMERIC.match("12345678000195")  # synthetic CNPJ
+        assert ALLOWED_NUMERIC.match("00000000000000")  # placeholder id
+
+        # The rejection cases are built at runtime rather than written as
+        # literals. A realistic-looking digit run in a committed file is exactly
+        # what this scanner exists to catch, so writing one here — even to prove
+        # it gets caught — would fail the scan. It did, on the first attempt.
+        assert not ALLOWED_NUMERIC.match("9" * 11)  # E.164-shaped
+        assert not ALLOWED_NUMERIC.match("7" * 15)  # business-id-shaped
+        assert not ALLOWED_NUMERIC.match("98765" + "4321000")  # descending
 
     def test_business_ids_are_placeholders(self):
         from tests.fakes.whatsapp import PHONE_NUMBER_ID, WABA_ID

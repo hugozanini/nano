@@ -51,11 +51,41 @@ CATEGORIES = [
     "other",
 ]
 
-PROMPT = """You map supermarket receipt line items to canonical English names.
+# Worked examples, kept as data rather than embedded in the prompt text.
+#
+# They live here because a find-and-replace over prompt *prose* once rewrote the
+# left-hand side of an example and left the right-hand side alone, producing the
+# instruction `"OUS M-12" -> "bacon"`. The model obeyed it faithfully, and at
+# temperature 0 it obeyed it every single time. A corrupted example is not a
+# typo; it is a false instruction. `test_canonicalise.py` asserts this table
+# against known-correct translations, so the same mistake fails a test instead
+# of quietly poisoning the data.
+TRANSLATION_EXAMPLES: dict[str, str] = {
+    "POMA GOLDEN 1KG": "apple",
+    "ARROS RODO 1KG": "rice",
+    "LLET SENCERA 1L": "milk",
+    "OUS M-12": "egg",
+    "PA INTEGRAL": "bread",
+    "IOGURT NATURAL P-4": "yogurt",
+    "PILES AAA P-4": "battery",
+}
 
-Receipts are printed in Catalan, Spanish, Portuguese or English, heavily abbreviated, and include pack sizes and brand names. For each input line return:
+PROMPT = """You translate supermarket receipt line items into canonical English product names.
 
-- "canonical": the plain English name of the product, singular, lowercase, no brand, no pack size, no quantity. Examples: "POMA GOLDEN 1KG" -> "apple", "ARROS RODO 1KG" -> "rice", "IOGURT NATURAL P-4" -> "yogurt", "OUS M-12" -> "bacon", "LLET SENCERA 1L" -> "milk".
+Receipts are printed in Catalan, Spanish, Portuguese or English, heavily abbreviated, with pack sizes, counts and codes appended.
+
+Follow this method literally:
+1. Find the product word or words in the line, ignoring trailing size and pack codes such as "1KG", "P-4", "M-12" or "500 G".
+2. Translate only those words into English.
+3. Return the singular, lowercase English product name, with no brand, no pack size and no quantity.
+
+Do not infer a product from what commonly appears on a supermarket receipt. If the words say eggs, the answer is egg, however unfamiliar the rest of the line looks. Translating the words is the whole task.
+
+Worked examples:
+{examples}
+
+For each input line return:
+- "canonical": as described above.
 - "category": exactly one of {categories}.
 
 Return ONLY a JSON array, one object per input line, in the same order, each shaped:
@@ -147,7 +177,10 @@ def canonicalise_items(names: list[str], model: Any = None) -> list[dict[str, st
             return fallback
 
     numbered = "\n".join(f"{i + 1}. {name}" for i, name in enumerate(cleaned))
-    prompt = PROMPT.format(categories=", ".join(CATEGORIES), lines=numbered)
+    examples = "\n".join(
+        f'  "{source}" -> "{target}"' for source, target in TRANSLATION_EXAMPLES.items()
+    )
+    prompt = PROMPT.format(categories=", ".join(CATEGORIES), examples=examples, lines=numbered)
 
     try:
         response = model.generate_content(prompt)

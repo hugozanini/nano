@@ -40,17 +40,30 @@ SYSTEM_PROMPT = (
     "call get_list."
 )
 
-RECEIPT_PROMPT = """Extract structured data from this grocery receipt image. Return ONLY valid JSON, no markdown fences, no explanation, matching exactly this shape:
+RECEIPT_PROMPT = """Extract structured data from this receipt image. Return ONLY valid JSON, no markdown fences, no explanation, matching exactly this shape:
 {
-  "store_name": string,
+  "store_name": string, exactly as printed,
   "purchase_date": string in YYYY-MM-DD format (use today's date if not visible),
   "currency": string, 3-letter code, guess from context if not shown,
   "total_amount": number,
+  "receipt_language": string, BCP-47 tag for the language the receipt is PRINTED in, e.g. "ca", "es", "pt-PT", "pt-BR", "en",
+  "store_address": string, the address block exactly as printed, or "" if absent,
+  "store_city": string, ONLY if a city or town name is actually printed on the receipt. Do NOT infer it from the language. Use "" when it is not printed,
+  "store_postcode": string as printed, or "",
+  "tax_id": string, the business tax identifier as printed (CIF, NIF, CNPJ, VAT number), or "",
+  "tax_rates": array of numbers, every tax percentage in the tax/VAT summary table, e.g. [4, 10, 21]. Use [] if there is no tax table,
+  "country_guess": string, 2-letter ISO country code you believe this receipt is from,
+  "country_evidence": string, one short sentence saying what that belief is based on,
   "items": [
-    {"item_name": string, "quantity": number, "unit_price": number, "line_total": number}
+    {"item_name": string exactly as printed, "quantity": number, "unit_price": number, "line_total": number}
   ]
 }
-Make your best reasonable estimate for any field that isn't clearly visible rather than omitting it."""
+
+Two rules matter more than the rest:
+- "store_city" must come from the receipt itself. If the city is not printed, return "". A guess based on the language belongs in "country_guess" reasoning, never here.
+- "tax_rates" should list the percentages from the tax summary (often labelled IVA, VAT, TVA or MWST), not the amounts.
+
+Make your best reasonable estimate for any other field that is not clearly visible rather than omitting it."""
 
 
 def _function_declarations():
@@ -158,13 +171,32 @@ def _function_declarations():
     ]
 
 
+def _deterministic_config():
+    """Temperature 0 for every call Nano makes.
+
+    Intent classification, receipt extraction and item canonicalisation are all
+    extraction tasks with a right answer — sampling buys nothing and costs
+    consistency. Measured on a six-item Catalan basket, the default temperature
+    canonicalised `OUS M-12` (eggs) as "bacon" on one run in three while getting
+    it right on the other two. The same item mapping differently across receipts
+    would quietly undermine every GROUP BY built on `normalized_name`.
+    """
+    from vertexai.generative_models import GenerationConfig
+
+    return GenerationConfig(temperature=0.0, top_p=1.0)
+
+
 @lru_cache(maxsize=1)
 def classifier_model():
     from vertexai.generative_models import GenerativeModel, Tool
 
     vertex_initialised()
     tools = Tool(function_declarations=_function_declarations())
-    return GenerativeModel(get_settings().gemini_model, tools=[tools])
+    return GenerativeModel(
+        get_settings().gemini_model,
+        tools=[tools],
+        generation_config=_deterministic_config(),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -172,7 +204,10 @@ def extraction_model():
     from vertexai.generative_models import GenerativeModel
 
     vertex_initialised()
-    return GenerativeModel(get_settings().gemini_model)
+    return GenerativeModel(
+        get_settings().gemini_model,
+        generation_config=_deterministic_config(),
+    )
 
 
 def reset_models() -> None:
