@@ -37,6 +37,12 @@ done
 pass=0
 fail=0
 
+# `set -e` plus a mistake in this script must not look like success. Without
+# this, an aborted run prints checks, no summary, and exits 1 -- which is
+# exactly how the first version of the WhatsApp check failed.
+trap 'status=$?; if [ "$status" -ne 0 ] && [ "$fail" -eq 0 ]; then
+  echo; echo "ABORTED — the smoke script itself failed (exit $status), checks are incomplete"; fi' EXIT
+
 check() { # check <name> <expected> <actual>
   if [ "$2" = "$3" ]; then
     printf '  ok   %-44s %s\n' "$1" "$3"; pass=$((pass + 1))
@@ -63,7 +69,7 @@ check "newest revision is the one serving" "$READY" "$SERVING"
 # --- the verification handshake -------------------------------------------
 VERIFY_TOKEN=$(gcloud run services describe "$SERVICE" --region="$REGION" --project="$PROJECT" \
   --format='value(spec.template.spec.containers[0].env)' \
-  | tr ';' '\n' | grep -i 'VERIFY_TOKEN' | head -1 | sed "s/.*'value': '//;s/'.*//")
+  | tr ';' '\n' | grep -i 'VERIFY_TOKEN' | head -1 | sed "s/.*'value': '//;s/'.*//" || true)
 
 if [ -n "$VERIFY_TOKEN" ]; then
   challenge="nano-smoke-$$"
@@ -105,6 +111,49 @@ if [ -n "$APP_SECRET" ]; then
 else
   echo "  SKIP signed POST (cannot read the app secret)"
 fi
+
+# --- the half that is not ours --------------------------------------------
+# Everything above proves our service is healthy. All of it passed, six for
+# six, at a moment when Nano had been dead for fifteen hours: Meta had blocked
+# API access, so nothing could be sent and no webhook was being delivered. Not
+# one check noticed, because not one of them touched WhatsApp.
+#
+# A smoke test that reports success while the product is unreachable is worse
+# than no smoke test, because it also stops anyone looking.
+API_VERSION=$(gcloud run services describe "$SERVICE" --region="$REGION" --project="$PROJECT" \
+  --format='value(spec.template.spec.containers[0].env)' \
+  | tr ';' '\n' | grep -i 'GRAPH_API_VERSION' | head -1 | sed "s/.*'value': '//;s/'.*//" || true)
+API_VERSION="${API_VERSION:-v23.0}"
+
+PHONE_NUMBER_ID=$(gcloud run services describe "$SERVICE" --region="$REGION" --project="$PROJECT" \
+  --format='value(spec.template.spec.containers[0].env)' \
+  | tr ';' '\n' | grep -i 'PHONE_NUMBER_ID' | head -1 | sed "s/.*'value': '//;s/'.*//" || true)
+
+ACCESS_TOKEN=$(gcloud secrets versions access latest --secret=whatsapp-access-token \
+  --project="$PROJECT" 2>/dev/null || echo "")
+
+if [ -n "$ACCESS_TOKEN" ] && [ -n "$PHONE_NUMBER_ID" ]; then
+  # Reads the number's own record: the cheapest call that proves the token is
+  # accepted and the account is not restricted. Nothing is sent.
+  meta=$(curl -sS "https://graph.facebook.com/${API_VERSION}/${PHONE_NUMBER_ID}?fields=id&access_token=${ACCESS_TOKEN}" || echo '{"error":{"message":"could not reach graph.facebook.com"}}')
+  if printf '%s' "$meta" | grep -q '"error"'; then
+    # The type, code and message — never the token, never the number.
+    detail=$(printf '%s' "$meta" | python3 -c 'import json,sys;e=json.load(sys.stdin)["error"];print(e.get("type","?"),e.get("code","?"),"-",e.get("message","?"))' 2>/dev/null || echo "unparseable error")
+    check "WhatsApp API accepts our credentials" "ok" "$detail"
+  else
+    check "WhatsApp API accepts our credentials" "ok" "ok"
+  fi
+else
+  echo "  SKIP WhatsApp API check (no access token or phone number id)"
+fi
+
+# Informational, never a failure: nobody messaging Nano overnight is normal. It
+# earns its place next to the check above — "credentials fine, nothing received
+# in two days" and "credentials blocked" are different problems.
+last_inbound=$(gcloud logging read \
+  "resource.labels.service_name=\"${SERVICE}\" AND jsonPayload.message=\"message handled\"" \
+  --project="$PROJECT" --limit=1 --freshness=7d --format='value(timestamp)' 2>/dev/null | head -1)
+echo "  info last message handled: ${last_inbound:-none in the last 7 days}"
 
 echo
 if [ "$fail" -gt 0 ]; then
