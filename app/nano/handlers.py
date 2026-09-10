@@ -12,6 +12,7 @@ whoever asked, so "what's on the list?" stops buzzing both phones.
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import Any
 
@@ -567,6 +568,19 @@ def _undo(sender: str, sender_name: str, message_id: str, settings: Settings) ->
 
 FORCE_PHRASES = {"log it anyway", "log anyway", "yes log it", "different trip"}
 
+# How recent a receipt has to be for its items to count as "just bought", and so
+# be ticked off the shopping list.
+#
+# Every receipt used to clear matching items, which is right for the case it was
+# written for — you shop, you photograph the receipt, the things you bought come
+# off the list. It is wrong for the other reason people send receipts: a photo
+# of an invoice from last winter would tick coffee off today's list, and you
+# would come home without coffee.
+#
+# Two days rather than one, because a receipt photographed the morning after a
+# shop is still that shop.
+RECENT_PURCHASE = datetime.timedelta(days=2)
+
 
 def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
     sender_name = settings.name_for(message.sender)
@@ -720,11 +734,30 @@ def _handle_receipt(message: InboundMessage, settings: Settings) -> None:
         )
         return
 
+    total = extracted.get("total_amount", 0)
+    age = history.today_in_household_tz(settings) - purchased_on
+
+    if age > RECENT_PURCHASE:
+        # History, not a shop that just happened. Recorded in full, and the
+        # list is left exactly as it was.
+        log_with(
+            logger,
+            logging.INFO,
+            "logged an older receipt without touching the list",
+            age_days=age.days,
+        )
+        _broadcast(
+            f"Logged your receipt from {store_name} ({currency} {total}) "
+            f"on {purchased_on:%-d %b %Y}. That's from a while back, so I've added it "
+            f"to your history and left the shopping list alone.",
+            settings,
+        )
+        return
+
     item_names = [str(item.get("item_name", "")) for item in items]
     remaining = store.clear_matched_items(item_names, settings)
     events.record(events.PURCHASE_CLEARED, item_names, sender_name, settings, message.id)
 
-    total = extracted.get("total_amount", 0)
     _broadcast(
         f"Logged your receipt from {store_name} ({currency} {total}) "
         f"on {purchased_on:%-d %b}. {format_list(remaining)}",

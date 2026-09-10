@@ -75,16 +75,46 @@ class TestSanitisePurchaseDate:
         assert date == self.TODAY
         assert "future" in note
 
-    def test_a_very_old_date_with_a_valid_swap_is_reinterpreted(self):
-        date, note = receipts.sanitise_purchase_date("2026-01-09", today=self.TODAY)
-        assert date == datetime.date(2026, 9, 1)
-        assert "too old" in note
+    def test_an_old_date_is_kept_exactly_as_printed(self):
+        """This test used to assert the opposite, and the opposite was a bug.
 
-    def test_a_genuinely_old_receipt_is_kept(self):
-        """Old but unambiguous: no month 25, so it cannot be a swap."""
-        date, note = receipts.sanitise_purchase_date("2025-03-25", today=self.TODAY)
-        assert date == datetime.date(2025, 3, 25)
+        It read: 2026-01-09, being older than six months, should be swapped to
+        2026-09-01. So a receipt from 9 January was stored as 1 September --
+        eight months adrift, silently, with the explanation going only to the
+        logs. The rule was written to repair MM/DD confusion and it repaired
+        dates that were never broken.
+
+        The asymmetry that makes the future-date rule fine and this one wrong:
+        a future date is *impossible*, so a swap can only improve it. An old
+        date is merely unusual, and unusual is not evidence. Someone
+        photographing last winter's invoices is doing something entirely
+        normal, and second-guessing them corrupts the history they are building.
+        """
+        date, note = receipts.sanitise_purchase_date("2026-01-09", today=self.TODAY)
+        assert date == datetime.date(2026, 1, 9)
         assert note == ""
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["2026-02-05", "2026-03-04", "2026-01-08", "2025-12-07", "2024-06-11", "2025-03-25"],
+    )
+    def test_a_backfill_of_old_invoices_keeps_every_date(self, raw):
+        """The whole point of a backfill is that the dates are old."""
+        date, note = receipts.sanitise_purchase_date(raw, today=self.TODAY)
+        assert date == datetime.date.fromisoformat(raw)
+        assert note == ""
+
+    def test_a_future_date_still_swaps_even_when_the_result_is_old(self):
+        """The repair must not refuse its own correct answer.
+
+        Plausibility once required the swapped date to be recent too, so a
+        receipt printed 2026-12-03 swapped to 12 March, was rejected for being
+        six months old, and fell back to today -- inventing a date further from
+        the truth than the one it was fixing.
+        """
+        date, note = receipts.sanitise_purchase_date("2026-12-03", today=datetime.date(2026, 9, 30))
+        assert date == datetime.date(2026, 3, 12)
+        assert "future" in note
 
     @pytest.mark.parametrize("raw", ["", "not a date", "29/08/2026", None])
     def test_unparseable_values_fall_back_to_today(self, raw):

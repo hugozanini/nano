@@ -474,3 +474,156 @@ class TestReceiptOriginIsRecorded:
         insert = fake_bq.statements_matching("INSERT INTO `nano_test.purchases`")[-1]
         assert insert.param("country_code") == ""
         assert insert.param("location_confidence") == "none"
+
+
+class TestBackfillingOldReceipts:
+    """Photographing last winter's invoices, which is a different job.
+
+    Every receipt used to tick its items off the shopping list. That is right
+    for the case the code was written for — you shop, you photograph the
+    receipt, the things you bought come off the list. It is wrong for the other
+    reason people send receipts: an invoice from February listing coffee would
+    clear coffee off *today's* list, and you would come home without coffee.
+
+    The purchase itself is recorded in full either way. Only the list is left
+    alone.
+    """
+
+    def _log_receipt(self, client, app_secret, fake_gemini, receipt, *, date, message_id):
+        extracted = receipt.as_dict()
+        extracted["purchase_date"] = date
+        fake_gemini.queue_json(extracted)
+        fake_gemini.queue_json([{"canonical": "milk", "category": "dairy"} for _ in receipt.items])
+        return post(client, image_message(message_id=message_id), app_secret)
+
+    def test_an_old_receipt_leaves_the_shopping_list_alone(
+        self,
+        client: TestClient,
+        app_secret,
+        fake_gemini,
+        fake_whatsapp,
+        fake_bq,
+        fake_firestore,
+        receipt,
+    ):
+        from nano import store
+        from nano.config import load_settings
+
+        settings = load_settings()
+        store.add_items(["poma", "coffee"], settings)
+        self._log_receipt(
+            client,
+            app_secret,
+            fake_gemini,
+            receipt,
+            date="2026-01-08",
+            message_id="wamid.OLD1",
+        )
+        assert store.get_items(settings) == ["poma", "coffee"], (
+            "an invoice from January must not clear today's list — and POMA GOLDEN "
+            "1KG is on this receipt, so the matcher would have cleared it"
+        )
+
+    def test_an_old_receipt_is_still_recorded_in_full(
+        self, client: TestClient, app_secret, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        """Left alone means the list, not the history."""
+        self._log_receipt(
+            client,
+            app_secret,
+            fake_gemini,
+            receipt,
+            date="2026-01-08",
+            message_id="wamid.OLD2",
+        )
+        texts = " ".join(fake_whatsapp.texts)
+        assert "Logged your receipt" in texts
+
+    def test_it_says_why_the_list_was_untouched(
+        self, client: TestClient, app_secret, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        """Silence would read as the list-clearing having failed."""
+        self._log_receipt(
+            client,
+            app_secret,
+            fake_gemini,
+            receipt,
+            date="2026-01-08",
+            message_id="wamid.OLD3",
+        )
+        texts = " ".join(fake_whatsapp.texts)
+        assert "left the shopping list alone" in texts
+
+    def test_an_old_receipt_reply_carries_the_year(
+        self, client: TestClient, app_secret, fake_gemini, fake_whatsapp, fake_bq, receipt
+    ):
+        """ "on 8 Jan" is ambiguous across a backfill spanning years."""
+        self._log_receipt(
+            client,
+            app_secret,
+            fake_gemini,
+            receipt,
+            date="2026-01-08",
+            message_id="wamid.OLD4",
+        )
+        assert "2026" in " ".join(fake_whatsapp.texts)
+
+    def test_a_receipt_from_todays_shop_still_clears_the_list(
+        self,
+        client: TestClient,
+        app_secret,
+        fake_gemini,
+        fake_whatsapp,
+        fake_bq,
+        fake_firestore,
+        receipt,
+    ):
+        """The regression that would matter most: the normal case still works."""
+
+        from nano import history, store
+        from nano.config import load_settings
+
+        settings = load_settings()
+        store.add_items(["poma", "coffee"], settings)
+        today = history.today_in_household_tz(settings)
+        self._log_receipt(
+            client,
+            app_secret,
+            fake_gemini,
+            receipt,
+            date=today.isoformat(),
+            message_id="wamid.TODAY1",
+        )
+        assert "poma" not in store.get_items(settings), (
+            "a shop you just did should still tick items off"
+        )
+        assert "coffee" in store.get_items(settings), "and leave what was not bought"
+
+    def test_yesterdays_receipt_still_counts_as_the_shop_you_just_did(
+        self,
+        client: TestClient,
+        app_secret,
+        fake_gemini,
+        fake_whatsapp,
+        fake_bq,
+        fake_firestore,
+        receipt,
+    ):
+        """Photographed the morning after is still that shop."""
+        import datetime
+
+        from nano import history, store
+        from nano.config import load_settings
+
+        settings = load_settings()
+        store.add_items(["poma", "coffee"], settings)
+        yesterday = history.today_in_household_tz(settings) - datetime.timedelta(days=1)
+        self._log_receipt(
+            client,
+            app_secret,
+            fake_gemini,
+            receipt,
+            date=yesterday.isoformat(),
+            message_id="wamid.YDAY",
+        )
+        assert "poma" not in store.get_items(settings)

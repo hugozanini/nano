@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 # A receipt older than this is more likely a misread than a genuinely ancient
 # shop. Six months is generous: people do photograph old receipts.
-MAX_RECEIPT_AGE = datetime.timedelta(days=180)
 
 _EXTENSIONS = {
     "image/jpeg": "jpg",
@@ -100,12 +99,24 @@ def sanitise_purchase_date(
 
     1. Unparseable or missing -> today.
     2. In the future -> try swapping day and month; otherwise today.
-    3. Older than MAX_RECEIPT_AGE -> try swapping day and month; otherwise keep
-       it, because an old receipt is unusual but not impossible.
+    3. Anything else, however old -> keep exactly what was printed.
 
     The swap is only ever *tried*; it is accepted only when it produces a date
     that is itself plausible. A date like 2026-08-29 has no valid swap (there is
     no month 29), so an unambiguous date can never be mangled by this.
+
+    Rule 3 used to attempt the same swap on any receipt older than six months.
+    That was wrong, and it only became obvious with a backfill in prospect: a
+    receipt from 8 January, read on 10 September, is 245 days old and swaps to a
+    perfectly plausible 1 August, so it was stored seven months away from when
+    the shopping actually happened — silently, with the note going only to the
+    logs.
+
+    The asymmetry is the whole point. A date in the future is *impossible*, so
+    something must be wrong with it and a swap can only improve matters. A date
+    in the past is merely unusual, and "unusual" is not evidence: a person
+    photographing last winter's invoices is doing something completely normal,
+    and second-guessing them corrupts the very history they are building.
     """
     today = today or datetime.date.today()
 
@@ -118,12 +129,6 @@ def sanitise_purchase_date(
         if swapped and _is_plausible(swapped, today):
             return swapped, f"date {parsed.isoformat()} was in the future; read as {swapped}"
         return today, f"date {parsed.isoformat()} was in the future; used today"
-
-    if today - parsed > MAX_RECEIPT_AGE:
-        swapped = _swap_day_month(parsed)
-        if swapped and _is_plausible(swapped, today):
-            return swapped, f"date {parsed.isoformat()} looked too old; read as {swapped}"
-        return parsed, ""
 
     return parsed, ""
 
@@ -150,7 +155,16 @@ def _swap_day_month(value: datetime.date) -> datetime.date | None:
 
 
 def _is_plausible(value: datetime.date, today: datetime.date) -> bool:
-    return value <= today and (today - value) <= MAX_RECEIPT_AGE
+    """Could this date be when a shop actually happened?
+
+    Only one thing rules a date out: it has not happened yet. Age used to count
+    against a date here too, which made the future-date repair refuse its own
+    correct answer — a receipt printed 2026-12-03, read in September, swaps to
+    12 March, and that was rejected for being more than six months old, falling
+    back to "today" and inventing a date further from the truth than the one it
+    was fixing. An old date is a fact about the receipt, not a reason to doubt it.
+    """
+    return value <= today
 
 
 def normalise_currency(raw: str, settings: Settings | None = None) -> str:
