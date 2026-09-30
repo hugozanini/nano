@@ -103,8 +103,9 @@ latency and the duplicates in one change.
 
 Reading the messages themselves uses [Gemini's function
 calling](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling).
-The model does not write the reply; it chooses one of fourteen functions and fills in its
-arguments, and the code decides what to do. Receipt photos go to the same model, so there is no
+The model does not write the reply; it chooses one of [fourteen
+functions](https://github.com/hugozanini/nano/blob/6a908a3bf93c306f0db78c108889f424994b2cf9/app/nano/gemini.py#L117-L390)
+and fills in its arguments, and the code decides what to do. Receipt photos go to the same model, so there is no
 separate OCR service anywhere in the stack.
 
 ---
@@ -363,39 +364,54 @@ Answering wrongly misleads one person once. Filing wrongly misleads the roadmap.
 
 ---
 
-## 7. What it cost, and what isn't built
+## 7. Where it stands
 
-Running it costs a few dollars a month. Cloud Run scales to zero between messages, the Gemini
-calls are small, and BigQuery at this volume disappears into the free tier. Secrets live in
-[Secret Manager](https://cloud.google.com/secret-manager/docs), and deploys authenticate through
+Nano runs for a few dollars a month. Cloud Run scales to zero between messages, the Gemini calls
+are small, and BigQuery at this volume disappears into the free tier. Secrets live in [Secret
+Manager](https://cloud.google.com/secret-manager/docs) and deploys authenticate through
 [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation),
 so there are no downloadable keys anywhere in the project.
 
-There are 577 unit tests, and the test code is larger than the application code — roughly 7,100
-lines against 5,900. That ratio is not diligence for its own sake. Three separate times in this
-project, a test that *could not fail* passed happily while the thing it was guarding was
-thoroughly broken. Each time, the only thing that caught it was deliberately breaking the code
-to watch the test go red. I now do that as a matter of course, and I would recommend it to
-anyone.
+Three things surprised me, and they are what I would pass on.
 
-And then the things I planned and did not build:
+**The receipts taught the schema.** Every column I added after the first week — the country, the
+tax rates, the exchange rate and the date it applied — existed because a question I wanted to
+ask turned out to be unanswerable. I could not have designed that table up front, and with
+Iceberg I did not have to: each answer arrived as one additive `ALTER TABLE` against live data,
+with no backfill and nothing taken offline. For a project that changes shape every weekend,
+that mattered more than any performance argument.
 
-- **No Spark job.** The original design had serverless Spark reading the same Iceberg files to
-  learn our usual shopping day. The service account exists and has never run anything.
-- **No proactive reminders.** Same reason — it needs months of history before there is a pattern
-  worth learning.
-- **No second engine has ever read these tables.** "One copy of data, many engines" is the real
-  argument for an open format, and I have not actually demonstrated it. The files are open and
-  sitting in my bucket, which makes it a claim about what is *possible*, not something I have
-  done.
-- **Most spending questions still cannot be answered** — for want of data, not code. Three
-  shopping trips is not a trend.
+**Where the model stops is a product decision.** The temptation with a language model is to let
+it fill every silence, because it always can, and it always sounds right. The euro reported as
+a dollar taught me otherwise: it was not flagged as a guess, it simply read like an answer.
+Nano is more useful for saying "the receipt does not record that" than it would be for being
+confidently wrong twice a month.
 
-That is the honest state of it. The architecture is considerably further along than the dataset,
-which is a strange place to end up, and almost exactly where a side project always is.
+**Letting it file its own backlog changed what I built.** Three of the features in this article
+exist because Nano recorded a question it could not answer and I read the table later. That is
+a better product signal than my own intuition about what was missing, and it cost about forty
+lines of code.
+
+What is here now is genuinely further along than the data in it — three shopping trips is not a
+trend, and most of the interesting spending questions still cannot be answered for want of
+receipts rather than code. The serverless Spark job that was meant to learn our shopping day is
+still unwritten, waiting on months of history, and no second engine has yet read these Iceberg
+files, which is the real argument for an open format and something I would like to actually
+demonstrate rather than assert.
+
+All of which is to say it is a side project, and it is in exactly the place side projects live.
 
 The list works, though. We have stopped forgetting the coffee.
 
 ---
 
-*Nano is open source at [github.com/hugozanini/nano](https://github.com/hugozanini/nano).*
+## Try it, or take it apart
+
+Nano is open source at **[github.com/hugozanini/nano](https://github.com/hugozanini/nano)** —
+the full application, the Iceberg schema as numbered migrations, and the test suite.
+
+**Contributions are very welcome.** If you want somewhere to start: the Spark job for shopping
+patterns is unwritten, the analytics layer could cache repeated questions instead of
+regenerating their SQL, and receipt totals are not yet reconciled against their line items. Bug
+reports from anyone whose receipts print in a language I have not tested would be especially
+useful — that is precisely where this thing is weakest, and the part I cannot test alone.
